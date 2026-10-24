@@ -55,6 +55,37 @@ def detect_slip_in_image(img_bgr):
                     slip_box_x2 = min(img_bgr.shape[1], x + int(w * 14.0))
                     return True, (slip_box_x1, slip_box_y1, slip_box_x2 - slip_box_x1, slip_box_y2 - slip_box_y1)
 
+    # ttb uses a thin green success ring rather than a filled green badge.
+    soft_green = cv2.inRange(hsv, np.array([30, 40, 70]), np.array([90, 255, 255]))
+    joined_green = cv2.morphologyEx(
+        soft_green, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    )
+    ring_contours, _ = cv2.findContours(joined_green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    foreground = cv2.threshold(gray, 235, 255, cv2.THRESH_BINARY_INV)[1]
+    foreground = cv2.morphologyEx(
+        foreground, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    )
+    content_contours, _ = cv2.findContours(foreground, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for ring in sorted(ring_contours, key=cv2.contourArea, reverse=True):
+        area = cv2.contourArea(ring)
+        x, y, w, h = cv2.boundingRect(ring)
+        if area < max(200, img_bgr.shape[0] * img_bgr.shape[1] * 0.00035):
+            continue
+        if min(w, h) < 25 or not 0.75 <= w / h <= 1.25:
+            continue
+        center = (x + w // 2, y + h // 2)
+        for content in sorted(content_contours, key=cv2.contourArea, reverse=True):
+            if cv2.contourArea(content) < img_bgr.shape[0] * img_bgr.shape[1] * 0.1:
+                continue
+            cx, cy, cw, ch = cv2.boundingRect(content)
+            if not (cx <= center[0] < cx + cw and cy <= center[1] < cy + ch):
+                continue
+            top = max(cy, y - int(h * 1.1))
+            left = cx + int(cw * 0.01)
+            right = cx + cw - int(cw * 0.01)
+            return True, (left, top, right - left, cy + ch - top)
+
     return False, None
 
 
@@ -190,19 +221,14 @@ def clean_and_normalize_datetime(raw_dt, ref_id=""):
     Normalizes OCR garbled Thai dates into standard DD ด.ด. YYYY - HH:MM format.
     Also decodes ISO timestamp encoded in transaction ref_ids (e.g., 202504151902531655).
     """
-    # 1. ISO ref_id decoding (e.g., 202504151902531655)
-    m_ref = re.match(r"^(20\d{2})(0[1-9]|1[0-2])([0-3]\d)([0-2]\d)([0-5]\d)", ref_id or "")
-    if m_ref:
-        year = int(m_ref.group(1)) + 543
-        m_num = int(m_ref.group(2))
-        d_num = int(m_ref.group(3))
-        h_str = m_ref.group(4)
-        min_str = m_ref.group(5)
-        m_thai = THAI_MONTH_NAMES.get(m_num, "")
-        if m_thai and 1 <= d_num <= 31:
-            return f"{d_num:02d} {m_thai} {year} - {h_str}:{min_str}"
-
     if not raw_dt or raw_dt == "-":
+        m_ref = re.match(r"^(20\d{2})(0[1-9]|1[0-2])([0-3]\d)([0-2]\d)([0-5]\d)", ref_id or "")
+        if m_ref:
+            year = int(m_ref.group(1)) + 543
+            month = int(m_ref.group(2))
+            day = int(m_ref.group(3))
+            if 1 <= day <= 31:
+                return f"{day:02d} {THAI_MONTH_NAMES[month]} {year} - {m_ref.group(4)}:{m_ref.group(5)}"
         return "-"
 
     raw_dt = re.sub(r"\s+", " ", raw_dt.replace("\n", " ")).strip()
@@ -211,7 +237,7 @@ def clean_and_normalize_datetime(raw_dt, ref_id=""):
     # 1. "18 มี.ค. 68 15:42 น." or "18 มี.ค. 68 15:42"
     # 2. "01 Gn. 2568 - 09:45"
     # 3. "20 n.w. 2568 - 11:57"
-    m = re.search(r"(\d{1,2})\s+([^\s]+)\s+(256\d|6\d)\s*(?:-\s*|\s+)?(\d{1,2}:\d{2})(?:\s*น\.)?", raw_dt)
+    m = re.search(r"(\d{1,2})\s+([^\s]+)\s+(256\d|6\d)\s*(?:[-,]\s*|\s+)?(\d{1,2}:\d{2})(?:\s*น\.)?", raw_dt)
     if not m:
         m = re.search(r"(\d{1,2})\s+([^\s]+)\s+(256\d|6\d)", raw_dt)
         if not m:
@@ -254,7 +280,7 @@ def clean_and_normalize_datetime(raw_dt, ref_id=""):
     elif any(rm.lower() == k for k in ["s.a", "sa", "ธ.ค", "ธค"]):
         clean_m = "ธ.ค."
     else:
-        clean_m = raw_month
+        return "-"
 
     res = f"{day:02d} {clean_m} {year}"
     if time_str:
@@ -266,7 +292,44 @@ def evidence_review_status():
     return "OCR candidate - ต้องตรวจทาน"
 
 
-def extract_slip_details_ocr(slip_crop_bgr):
+def read_transaction_datetime_row(slip_crop_bgr):
+    if pytesseract is None:
+        return "", ""
+    gray = cv2.cvtColor(slip_crop_bgr, cv2.COLOR_BGR2GRAY)
+    try:
+        data = pytesseract.image_to_data(
+            gray, lang="script/Thai+eng", config="--psm 11", output_type=pytesseract.Output.DICT
+        )
+    except Exception:
+        return "", ""
+
+    time_boxes = []
+    for index, word in enumerate(data["text"]):
+        if re.fullmatch(r"(?:[01]?\d|2[0-3]):[0-5]\d", word.strip()):
+            time_boxes.append((int(data["top"][index]), int(data["height"][index])))
+    for top, height in sorted(time_boxes):
+        padding = max(12, int(height * 0.8))
+        row = gray[max(0, top - padding):min(gray.shape[0], top + height + padding), :]
+        try:
+            text = pytesseract.image_to_string(row, lang="script/Thai+eng", config="--psm 7").strip()
+        except Exception:
+            continue
+        normalized = clean_and_normalize_datetime(text)
+        match = re.fullmatch(r"(\d{2}) (\S+) (25\d{2}) - ((?:[01]\d|2[0-3]):[0-5]\d)", normalized)
+        if not match:
+            continue
+        month = next((key for key, value in THAI_MONTH_NAMES.items() if value == match.group(2)), None)
+        if month is None:
+            continue
+        try:
+            datetime.date(int(match.group(3)) - 543, month, int(match.group(1)))
+        except ValueError:
+            continue
+        return normalized, text
+    return "", ""
+
+
+def extract_slip_details_ocr(slip_crop_bgr, ocr_config=""):
     """
     Extracts structured transfer transaction details from cropped slip image using OCR.
     STRICT ZERO-GUESSING: Zero hardcoded names or banks.
@@ -275,14 +338,18 @@ def extract_slip_details_ocr(slip_crop_bgr):
         return {}
 
     gray = cv2.cvtColor(slip_crop_bgr, cv2.COLOR_BGR2GRAY)
+    if max(gray.shape) > 1800:
+        scale = 1800 / max(gray.shape)
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    ocr_options = {"config": ocr_config} if ocr_config else {}
     raw_text = ""
     try:
-        raw_text = pytesseract.image_to_string(gray, lang="tha+eng")
+        raw_text = pytesseract.image_to_string(gray, lang="tha+eng", **ocr_options)
     except Exception:
         pass
     if not any("\u0e00" <= char <= "\u0e7f" for char in raw_text):
         try:
-            thai_script_text = pytesseract.image_to_string(gray, lang="script/Thai+eng")
+            thai_script_text = pytesseract.image_to_string(gray, lang="script/Thai+eng", **ocr_options)
             if sum("\u0e00" <= char <= "\u0e7f" for char in thai_script_text) > sum(
                 "\u0e00" <= char <= "\u0e7f" for char in raw_text
             ):
@@ -291,7 +358,7 @@ def extract_slip_details_ocr(slip_crop_bgr):
             pass
     if not raw_text:
         try:
-            raw_text = pytesseract.image_to_string(gray, lang="eng")
+            raw_text = pytesseract.image_to_string(gray, lang="eng", **ocr_options)
         except Exception:
             raw_text = ""
     if not raw_text.strip():
@@ -326,23 +393,24 @@ def extract_slip_details_ocr(slip_crop_bgr):
 
     # Extract Date and Time (supporting 4-digit and 2-digit years, and normalize OCR Thai months)
     raw_dt = ""
-    date_search_text = re.sub(r"(?<=[\u0e00-\u0e7f])\s+(?=[\u0e00-\u0e7f.])", "", raw_text)
+    ocr_lines = [line for line in raw_text.splitlines() if line.strip()]
+    success_line = next(
+        (index for index, line in enumerate(ocr_lines) if "โอนเงินสำเร็จ" in normalize_spaced_ocr_line(line)),
+        -1,
+    )
+    date_source = "\n".join(ocr_lines[success_line + 1:]) if success_line >= 0 else raw_text
+    date_search_text = re.sub(r"(?<=[\u0e00-\u0e7f])\s+(?=[\u0e00-\u0e7f.])", "", date_source)
     date_search_text = re.sub(r"\s*\.\s*", ".", date_search_text)
     date_search_text = re.sub(r"\.(?=(?:256\d|6\d)\b)", ". ", date_search_text)
-    m_dt = re.search(r"(\d{1,2}\s+[^\s]{1,12}\s+(?:256\d|6\d)\s*(?:-\s*|\s+)?\d{1,2}:\d{2}(?:\s*น\.)?)", date_search_text)
+    m_dt = re.search(r"(\d{1,2}\s+[^\s]{1,12}\s+(?:256\d|6\d)\s*(?:[-,]\s*|\s+)?\d{1,2}:\d{2}(?:\s*น\.)?)", date_search_text)
     if not m_dt:
-        m_dt = re.search(r"(\d{1,2}\s+[^\s\d]{1,10}\s+(?:256\d|6\d)\s*(?:-\s*|\s+)?\d{1,2}:\d{2}(?:\s*น\.)?)", date_search_text)
+        m_dt = re.search(r"(\d{1,2}\s+[^\s\d]{1,10}\s+(?:256\d|6\d)\s*(?:[-,]\s*|\s+)?\d{1,2}:\d{2}(?:\s*น\.)?)", date_search_text)
     if not m_dt:
         m_dt = re.search(r"(\d{1,2}\s+[^\s\d]{1,10}\s+(?:256\d|6\d))", date_search_text)
     if m_dt:
         raw_dt = m_dt.group(1).strip()
 
-    ref_timestamp = re.match(r"^20\d{6}(\d{2})(\d{2})", details.get("ref_id", ""))
-    visible_times = re.findall(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b", raw_text)
-    if ref_timestamp and any(time != f"{ref_timestamp.group(1)}:{ref_timestamp.group(2)}" for time in visible_times):
-        details["datetime"] = "-"
-    else:
-        details["datetime"] = clean_and_normalize_datetime(raw_dt, details.get("ref_id", ""))
+    details["datetime"] = clean_and_normalize_datetime(raw_dt)
 
     # Extract Bank Identifiers (Spatial Separation & Knowledge Binding)
     lines = [normalize_spaced_ocr_line(line) for line in raw_text.splitlines() if line.strip()]
@@ -387,12 +455,25 @@ def extract_slip_details_ocr(slip_crop_bgr):
 
     account_pattern = re.compile(r"[X\d]{3}-[X\d]-[X\d]{5}-\d", re.IGNORECASE)
     account_blocks = []
+    previous_account_index = -1
     for index, line in enumerate(lines):
         if not account_pattern.fullmatch(line) or index < 2:
             continue
-        bank = parse_bank_from_text(lines[index - 1])
+        bank = next((value for value in (
+            parse_bank_from_text(lines[neighbor])
+            for neighbor in (index + 1, index - 1)
+            if 0 <= neighbor < len(lines)
+        ) if value), None)
         if bank:
-            account_blocks.append((line, bank, lines[index - 2]))
+            party_start = max(0, index - 4, previous_account_index + 1)
+            if from_idx >= 0 and (to_idx < 0 or index < to_idx):
+                party_start = max(party_start, from_idx)
+            if to_idx >= 0 and index >= to_idx:
+                party_start = max(party_start, to_idx)
+            name = next((candidate for candidate in reversed(lines[party_start:index])
+                         if re.match(r"^(?:นาย|นางสาว|นาง|น\.ส\.|สิบตรี|ดร\.)", candidate)), "")
+            account_blocks.append((line, bank, name))
+        previous_account_index = index
 
     ordered_accounts = account_pattern.findall(raw_text)
     aligned_blocks = len(account_blocks) >= 2 and [block[0] for block in account_blocks[:2]] == ordered_accounts[:2]
@@ -433,6 +514,29 @@ def extract_slip_details_ocr(slip_crop_bgr):
     return details
 
 
+def supplement_review_fields(primary, focused):
+    amount = lambda value: re.sub(r"[,\s]", "", value or "")
+    if not primary.get("amount") or amount(primary["amount"]) != amount(focused.get("amount")):
+        return primary
+    if any(
+        not primary.get(key) or primary.get(key) != focused.get(key)
+        for key in ("sender_acc", "receiver_acc")
+    ):
+        return primary
+    changed = False
+    for key in ("sender", "receiver"):
+        if primary.get(key, "").startswith("ไม่ระบุชื่อ") and not focused.get(key, "").startswith("ไม่ระบุชื่อ"):
+            primary[key] = focused[key]
+            changed = True
+    for key in ("sender_bank", "receiver_bank"):
+        if primary.get(key) in (None, "", "-") and focused.get(key) not in (None, "", "-"):
+            primary[key] = focused[key]
+            changed = True
+    if changed:
+        primary["supplemental_ocr_text"] = focused.get("raw_text", "")
+    return primary
+
+
 def search_slips_in_pdf(pdf_path, output_excel=True, output_json=True, log_func=print, password=""):
     """
     Main function for Search_Slip skill.
@@ -466,6 +570,32 @@ def search_slips_in_pdf(pdf_path, output_excel=True, output_json=True, log_func=
             x, y, w, h = box
             crop = img_bgr[y:y+h, x:x+w]
             details = extract_slip_details_ocr(crop)
+            needs_datetime = details.get("datetime") in ("", "-")
+            needs_party = any(details.get(key) in (None, "", "-") for key in ("sender_bank", "receiver_bank")) or any(
+                details.get(key, "").startswith("ไม่ระบุชื่อ") for key in ("sender", "receiver")
+            )
+            if needs_datetime or needs_party:
+                high_pix = page.get_pixmap(dpi=300)
+                high_img = np.frombuffer(high_pix.samples, dtype=np.uint8).reshape(
+                    (high_pix.height, high_pix.width, high_pix.n)
+                )
+                high_bgr = cv2.cvtColor(
+                    high_img, cv2.COLOR_RGB2BGR if high_pix.n == 3 else cv2.COLOR_RGBA2BGR
+                )
+                scale_x = high_pix.width / pix.width
+                scale_y = high_pix.height / pix.height
+                high_crop = high_bgr[
+                    int(y * scale_y):int((y + h) * scale_y),
+                    int(x * scale_x):int((x + w) * scale_x),
+                ]
+                if high_crop.size:
+                    if needs_datetime:
+                        focused_datetime, focused_text = read_transaction_datetime_row(high_crop)
+                        if focused_datetime:
+                            details["datetime"] = focused_datetime
+                            details["datetime_ocr_text"] = focused_text
+                    if needs_party:
+                        supplement_review_fields(details, extract_slip_details_ocr(high_crop, ocr_config="--psm 6"))
 
             ref_id = details.get("ref_id", "")
             amount = details.get("amount", "")
@@ -484,6 +614,8 @@ def search_slips_in_pdf(pdf_path, output_excel=True, output_json=True, log_func=
                 "repeated_ref": repeated_ref,
                 "amount": amount,
                 "datetime": dt,
+                "datetime_ocr_text": details.get("datetime_ocr_text", ""),
+                "supplemental_ocr_text": details.get("supplemental_ocr_text", ""),
                 "ref_id": ref_id,
                 "sender_bank": details.get("sender_bank") or "-",
                 "sender_name": details.get("sender") or "ไม่ระบุชื่อ (อ่านจากภาพไม่ได้)",

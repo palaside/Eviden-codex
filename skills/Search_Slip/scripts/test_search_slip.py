@@ -293,7 +293,8 @@ XXX-X-XX996-5
                 },
             ])
             with patch("search_slip.detect_slip_in_image", return_value=(True, (20, 20, 100, 160))), patch(
-                "search_slip.extract_slip_details_ocr", side_effect=lambda _crop: next(details_by_page)
+                "search_slip.extract_slip_details_ocr",
+                side_effect=lambda _crop, ocr_config="": {} if ocr_config else next(details_by_page),
             ):
                 results = search_slips_in_pdf(pdf_path, output_excel=True, output_json=True)
 
@@ -325,7 +326,8 @@ XXX-X-XX996-5
                 {"raw_text": "OCR page two", "ref_id": "", "amount": "5000.00"},
             ])
             with patch("search_slip.detect_slip_in_image", return_value=(True, (20, 20, 100, 160))), patch(
-                "search_slip.extract_slip_details_ocr", side_effect=lambda _crop: next(details_by_page)
+                "search_slip.extract_slip_details_ocr",
+                side_effect=lambda _crop, ocr_config="": {} if ocr_config else next(details_by_page),
             ):
                 results = search_slips_in_pdf(pdf_path, output_excel=False, output_json=False)
 
