@@ -19,6 +19,19 @@ from search_slip import (
     search_slips_in_pdf,
     supplement_review_fields,
 )
+from test_workspace import activate_test_workspace, deactivate_test_workspace
+
+
+_previous_tempdir = None
+
+
+def setUpModule():
+    global _previous_tempdir
+    _previous_tempdir = activate_test_workspace()
+
+
+def tearDownModule():
+    deactivate_test_workspace(_previous_tempdir)
 
 
 SAMPLE = Path(__file__).resolve().parents[3] / "For Test" / "Done" / "A4_IMG_ (23).PNG"

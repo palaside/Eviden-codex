@@ -11,6 +11,19 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
 from search_slip import clean_and_normalize_datetime, evidence_review_status, export_to_excel, extract_slip_details_ocr, search_slips_in_pdf
+from test_workspace import activate_test_workspace, deactivate_test_workspace
+
+
+_previous_tempdir = None
+
+
+def setUpModule():
+    global _previous_tempdir
+    _previous_tempdir = activate_test_workspace()
+
+
+def tearDownModule():
+    deactivate_test_workspace(_previous_tempdir)
 
 
 class TestSearchSlip(unittest.TestCase):
