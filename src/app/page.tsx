@@ -73,6 +73,7 @@ import { buildProcessingWarningEntries } from "@/utils/processing-warning-entrie
 import { clearEvidenceQueueSnapshot, EXTRACTION_VERSION, loadEvidenceQueueSnapshot, restoreEvidenceQueueSnapshot, saveEvidenceQueueSnapshot, serializeEvidenceQueueSnapshot } from "@/utils/evidence-queue-persistence";
 import { buildEvidenceDiagnosticTrace } from "@/utils/evidence-diagnostic-trace.mjs";
 import { classifyUniqueEvidenceItems } from "@/utils/evidence-detection-pipeline.mjs";
+import { matchLegalSignalsInText, getLegalSignalDictionaryMetadata } from "@/utils/legal-signal-matcher.mjs";
 
 interface ExtractionMetadata {
   file_name: string;
@@ -98,6 +99,33 @@ type SearchSlipScanCandidate = {
   memo: string;
   raw_text: string;
   review_status: string;
+};
+type LegalSignalHit = {
+  id: string;
+  sourceItemId: string;
+  sourceFileName: string;
+  page: number;
+  text: string;
+  confidence: number;
+  bounds: { x: number; y: number; width: number; height: number };
+  provisionId: string;
+  lawId: string;
+  phrase: string;
+  sourceKind: string;
+  reviewStatus: "human_review_required";
+  legalDecision: false;
+  missingEvidence: string[];
+  counterIndicators: string[];
+};
+type LegalResearchResult = {
+  success: boolean;
+  reviewOnly?: boolean;
+  legalDecision?: false;
+  answer?: string;
+  message?: string;
+  source?: string;
+  retryable?: boolean;
+  citations?: Record<string, { source_url?: string; label?: string; title?: string }>;
 };
 type DuplicateAuditCandidate = {
   occurrenceId: string;
@@ -316,6 +344,81 @@ export default function MasterEvidenceWorkspace() {
     () => summarizeDetectedSlipRecipients(ledgerRecords),
     [ledgerRecords]
   );
+  const legalSignalHits = useMemo<LegalSignalHit[]>(() => {
+    const hits: LegalSignalHit[] = [];
+    for (const item of stagedQueue) {
+      for (const page of item.chatEvidenceLayers || []) {
+        const groups = new Map<string, {
+          text: string;
+          confidence: number;
+          bounds: { x: number; y: number; width: number; height: number };
+        }>();
+        for (const line of page.layer2) {
+          const text = (line.sourceLineText || line.text || "").trim();
+          if (!text) continue;
+          const key = `${line.groupId}:${text}`;
+          const current = groups.get(key);
+          if (current) {
+            const x1 = Math.min(current.bounds.x, line.bounds.x);
+            const y1 = Math.min(current.bounds.y, line.bounds.y);
+            const x2 = Math.max(current.bounds.x + current.bounds.width, line.bounds.x + line.bounds.width);
+            const y2 = Math.max(current.bounds.y + current.bounds.height, line.bounds.y + line.bounds.height);
+            current.bounds = { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+            current.confidence = Math.max(current.confidence, line.confidence);
+          } else {
+            groups.set(key, { text, confidence: line.confidence, bounds: line.bounds });
+          }
+        }
+        for (const [groupKey, group] of groups) {
+          for (const match of matchLegalSignalsInText(group.text)) {
+            hits.push({
+              id: `${item.id}-${page.pageNumber}-${groupKey}-${match.provisionId}-${match.phrase}`,
+              sourceItemId: item.id,
+              sourceFileName: item.file.name,
+              page: page.pageNumber,
+              text: group.text,
+              confidence: group.confidence,
+              bounds: group.bounds,
+              provisionId: match.provisionId,
+              lawId: match.lawId,
+              phrase: match.phrase,
+              sourceKind: match.sourceKind,
+              reviewStatus: "human_review_required",
+              legalDecision: false,
+              missingEvidence: match.missingEvidence,
+              counterIndicators: match.counterIndicators,
+            });
+          }
+        }
+      }
+    }
+    return hits;
+  }, [stagedQueue]);
+  const legalSignalMetadata = getLegalSignalDictionaryMetadata();
+  const [legalResearchByHit, setLegalResearchByHit] = useState<Record<string, LegalResearchResult>>({});
+  const [legalResearchingHitId, setLegalResearchingHitId] = useState<string | null>(null);
+  async function researchLegalSignal(hit: LegalSignalHit) {
+    setLegalResearchingHitId(hit.id);
+    try {
+      const response = await fetch("/api/legal/tlex", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          query: `จากข้อความ OCR ที่พบว่า “${hit.text}” และสัญญาณ “${hit.phrase}” ซึ่งอยู่ในหน้า ${hit.page} ของหลักฐาน โปรดอธิบายว่าควรตรวจประเด็นกฎหมายใดบ้าง โดยระบุองค์ประกอบ ข้อเท็จจริงที่ยังขาด และแหล่งอ้างอิง ห้ามสรุปว่าผู้ใดผิด`,
+        }),
+      });
+      const result = await response.json() as LegalResearchResult;
+      setLegalResearchByHit((previous) => ({ ...previous, [hit.id]: result }));
+    } catch (error) {
+      setLegalResearchByHit((previous) => ({
+        ...previous,
+        [hit.id]: { success: false, message: error instanceof Error ? error.message : "เรียก MCP ไม่สำเร็จ" },
+      }));
+    } finally {
+      setLegalResearchingHitId(null);
+    }
+  }
   const [perceptualHashes, setPerceptualHashes] = useState<Map<string, string>>(new Map());
   useEffect(() => {
     let active = true;
@@ -4185,7 +4288,13 @@ export default function MasterEvidenceWorkspace() {
                 สรุปข้อมูลและเส้นทางการเงิน
               </button>
               <button
-                onClick={() => setLegalContextModalOpen(true)}
+                type="button"
+                aria-expanded={legalContextModalOpen}
+                aria-controls="legal-context-modal"
+                onClick={(event) => {
+                  event.preventDefault();
+                  setLegalContextModalOpen(true);
+                }}
                 className="btn-proportional-primary glass-button w-full min-w-0 justify-start whitespace-normal break-words text-[11px] leading-tight py-2 border-indigo-400/30 hover:border-indigo-400/60 bg-indigo-950/20 text-indigo-200 hover:text-white transition-all"
               >
                 📜 รายการกฎหมายที่อาจเกี่ยวข้อง (เบื้องต้น)
@@ -5196,7 +5305,7 @@ export default function MasterEvidenceWorkspace() {
           โมดูลที่ 5: รายการกฎหมายที่อาจเกี่ยวข้อง (แพ่ง / อาญา)
           ===================================================================== */}
       {legalContextModalOpen && (
-        <div className="absolute inset-0 glass-modal-backdrop z-50 flex items-center justify-center p-4">
+        <div id="legal-context-modal" role="dialog" aria-modal="true" aria-label="รายการกฎหมายที่อาจเกี่ยวข้อง" className="absolute inset-0 glass-modal-backdrop z-50 flex items-center justify-center p-4">
           <div className="glass-modal w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden shadow-2xl border border-indigo-400/40 rounded-2xl bg-slate-950/90 backdrop-blur-xl">
             {/* Header */}
             <div className="p-4 border-b border-white/10 flex items-center justify-between bg-indigo-950/60 shrink-0">
@@ -5224,6 +5333,88 @@ export default function MasterEvidenceWorkspace() {
 
             {/* Modal Body */}
             <div className="p-5 overflow-y-auto max-h-[72vh] flex flex-col gap-5 text-xs thai-clearance-stack">
+              <section className="rounded-xl border border-amber-400/30 bg-amber-950/20 p-3.5" aria-label="สัญญาณจาก OCR ที่อาจเกี่ยวข้อง">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="font-bold text-amber-200">สัญญาณจาก OCR ที่อาจเกี่ยวข้อง</h4>
+                    <p className="mt-1 text-[10px] text-slate-400">
+                      Dictionary {legalSignalMetadata.dictionaryVersion} · พบ {legalSignalHits.length} จุด · ทุกจุดเป็น review lead ไม่ใช่ข้อสรุป
+                    </p>
+                  </div>
+                  <span className="rounded border border-amber-300/30 px-2 py-1 text-[10px] font-mono text-amber-200">HUMAN REVIEW REQUIRED</span>
+                </div>
+                {legalSignalHits.length === 0 ? (
+                  <div className="mt-3 rounded border border-white/10 bg-black/20 p-3 text-[11px] text-slate-400">
+                    ยังไม่พบสัญญาณจากข้อความ OCR ที่ผ่าน dictionary นี้ · ไม่ได้แปลว่าไม่มีเหตุการณ์หรือไม่มีความผิด
+                  </div>
+                ) : (
+                  <div className="mt-3 max-h-64 space-y-2 overflow-y-auto pr-1">
+                    {legalSignalHits.map((hit) => {
+                      const itemIndex = stagedQueue.findIndex((item) => item.id === hit.sourceItemId);
+                      return (
+                        <div key={hit.id} className="rounded border border-amber-300/20 bg-black/20 p-2.5">
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="font-semibold text-slate-100">หน้า {hit.page} · {hit.phrase}</div>
+                              <div className="mt-1 break-words text-[11px] text-amber-100">“{hit.text}”</div>
+                              <div className="mt-1 text-[10px] text-slate-500">
+                                {hit.sourceFileName} · พิกัด {Math.round(hit.bounds.x)},{Math.round(hit.bounds.y)} · OCR {Math.round(hit.confidence * 100)}% · {hit.provisionId}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (itemIndex >= 0) {
+                                  setSelectedItemIndex(itemIndex);
+                                  setSelectedSliceIndex(Math.max(0, hit.page - 1));
+                                }
+                                setLegalContextModalOpen(false);
+                              }}
+                              className="shrink-0 rounded border border-sky-300/30 px-2 py-1 text-[10px] text-sky-200 hover:bg-sky-300/10"
+                            >เปิดหลักฐานต้นฉบับ</button>
+                            <button
+                              type="button"
+                              onClick={() => researchLegalSignal(hit)}
+                              disabled={legalResearchingHitId === hit.id}
+                              className="shrink-0 rounded border border-indigo-300/30 px-2 py-1 text-[10px] text-indigo-200 hover:bg-indigo-300/10 disabled:opacity-50"
+                              title="ส่งเฉพาะข้อความและคำถามที่สร้างขึ้นไป FourCorners T-LEX"
+                            >{legalResearchingHitId === hit.id ? "กำลังค้นกฎหมาย..." : "ค้นกฎหมายประกอบ"}</button>
+                          </div>
+                          <div className="mt-1.5 text-[10px] text-slate-400">
+                            สถานะ: รอตรวจทาน · ไม่ได้ยืนยันการฝ่าฝืน · ต้องตรวจบริบทและตัวชี้ค้าน
+                          </div>
+                          {legalResearchByHit[hit.id] && (
+                            <div className="mt-2 rounded border border-indigo-300/20 bg-indigo-950/20 p-2 text-[10px] text-indigo-100">
+                              <div className="font-semibold text-indigo-200">ผลค้นคว้าจาก {legalResearchByHit[hit.id].source || "FourCorners T-LEX"}</div>
+                              <div className="mt-1 whitespace-pre-wrap break-words">{legalResearchByHit[hit.id].success ? (legalResearchByHit[hit.id].answer || "ไม่พบข้อความคำตอบ") : `เรียกค้นไม่สำเร็จ: ${legalResearchByHit[hit.id].message || "ไม่ทราบสาเหตุ"}`}</div>
+                              {!legalResearchByHit[hit.id].success && legalResearchByHit[hit.id].retryable === false && (
+                                <div className="mt-1 text-amber-200">สาเหตุอยู่ที่โควตาหรือข้อจำกัดของบริการภายนอก · ไม่ retry อัตโนมัติ · สถานะหลักฐานไม่เปลี่ยน</div>
+                              )}
+                              {legalResearchByHit[hit.id].success && Object.keys(legalResearchByHit[hit.id].citations || {}).length > 0 && (
+                                <div className="mt-2 border-t border-indigo-300/20 pt-2">
+                                  <div className="font-semibold text-indigo-200">แหล่งอ้างอิงจาก MCP</div>
+                                  <div className="mt-1 space-y-1">
+                                    {Object.entries(legalResearchByHit[hit.id].citations || {}).map(([key, citation]) => (
+                                      <a
+                                        key={key}
+                                        href={citation.source_url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="block break-all text-sky-200 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-100"
+                                      >{citation.label || citation.title || key}: {citation.source_url}</a>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              <div className="mt-1 text-amber-200">ข้อมูลนี้เป็น reference เพื่อให้มนุษย์ตรวจ ไม่ใช่คำวินิจฉัย และไม่เปลี่ยนสถานะหลักฐาน</div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
               {/* ===============================================================
                   ส่วนที่ ๑: บัตรสรุปสถานะด้านบน (Top KPI Cards - 3 คอลัมน์)
                   =============================================================== */}
