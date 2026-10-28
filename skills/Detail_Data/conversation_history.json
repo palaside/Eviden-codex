@@ -1,0 +1,82 @@
+{
+  "project_name": "EVIDENCE Legal-Grade Automation Ecosystem",
+  "version": "2.2.0",
+  "updated_at": "2026-09-06T19:05:00+07:00",
+  "architecture_pattern": "Event-Driven Hot Folder Pipeline / Drop-and-Go Daemon",
+  "conversation_full_timeline": [
+    {
+      "step": 1,
+      "topic": "Excel Slip Generator (Detail_Data)",
+      "user_request": "สร้างระบบสกัดข้อมูลสลิป 10 คอลัมน์ ออกมาเป็น Excel A4 แนวนอน หน้าละ 20 แถว พร้อมหัวตารางและข้อความ Disclaimer",
+      "resolution": "สร้าง config/schema.json, generate_excel.py, และ GEMINI_GEM_MASTER_PROMPT.md สำหรับ Gemini Gem",
+      "status": "COMPLETED"
+    },
+    {
+      "step": 2,
+      "topic": "Google Drive & Desktop Silent Watcher",
+      "user_request": "โยนไฟล์ไปพักนึงแล้วอยากให้ระบบทำอัตโนมัติเบื้องหลังแบบโยนปุ๊บ ออกปั๊บ ไม่ต้องพิมพ์คำสั่ง",
+      "resolution": "พัฒนา gdrive_watcher.py, แก้ปัญหา Windows Thai encoding (cp1252/charmap) และ pythonw stdout ด้วย safe logger ลง watcher.log, ติดตั้ง start_evidence_watcher.vbs เข้า Windows Startup",
+      "status": "COMPLETED"
+    },
+    {
+      "step": 3,
+      "topic": "Single Slip per Page & Center Alignment",
+      "user_request": "ปรับให้สลิปอยู่กึ่งกลางกล่องทั้งแกน X และ Y, สลิปละ 1 หน้าเดี่ยว ห้ามซ้อนกัน",
+      "resolution": "เพิ่ม trim_outer_padding() ลบขอบขาว, ปรับ add_single_page_image() จัดสลิปเดี่ยวลงบน A4 แนวตั้ง (993x1406 px) กึ่งกลางเป๊ะ",
+      "status": "COMPLETED"
+    },
+    {
+      "step": 4,
+      "topic": "Landscape Summary Sheet & Sarabun Light Font",
+      "user_request": "ใบสรุป 10 คอลัมน์ตอนท้ายปรับเป็นฟอนต์ Sarabun Light, ปรับเป็นแนวนอนแค่แผ่นสรุปแผ่นเดียว, ขยายช่องตาราง และจัดตัวอักษรกึ่งกลางทุกช่อง",
+      "resolution": "พัฒนา add_10col_landscape_summary_page() สร้างหน้าสุดท้ายเป็น A4 แนวนอน (1406x993 px), ตารางกว้าง 1,202 px, ข้อความและตัวเลขจัดกึ่งกลางทุกเซลล์ด้วย Sarabun Light",
+      "status": "COMPLETED"
+    },
+    {
+      "step": 5,
+      "topic": "Architecture Documentation & Gemini Notebook Export",
+      "user_request": "อธิบายชื่อทางเทคนิคของระบบ, แนะนำรูปแบบ Automation อื่นๆ และบันทึกทั้งหมดเป็น JSON, README, และ PROJECT_STATUS เพื่อนำไปวางใน Gemini Notebook",
+      "resolution": "สร้าง PROJECT_STATUS.md, CONVERSATION_HISTORY.md, conversation_history.json, และ automation_architect_framework.json ส่งออกไปยังโฟลเดอร์สำหรับ Gemini Notebook",
+      "status": "COMPLETED"
+    },
+    {
+      "step": 6,
+      "topic": "In/Out Path Customization & Hot Folder Mechanics (The Magic)",
+      "user_request": "ถามเรื่องการย้ายพาทโฟลเดอร์ In/Out และถามถึงกลไกการทำงานเบื้องหลังว่าทำไมโยนไฟล์แล้วระบบทำงานอัตโนมัติได้เหมือนเวทมนตร์",
+      "resolution": "อธิบายการตั้งค่าผ่าน config/gdrive_config.json และอธิบายกลไก 5 ชิ้นส่วน (Polling Loop, File Stability Check, pythonw Windowless VBScript, Windows Startup Hook, Auto-Archive to processed/)",
+      "status": "COMPLETED"
+    }
+  ],
+  "technical_specifications": {
+    "excel": {
+      "orientation": "Landscape A4",
+      "rows_per_page": 20,
+      "header_logo": "C:\\Users\\EVE\\OneDrive\\เดสก์ท็อป\\EVIDENCE.png",
+      "schema_columns": 10,
+      "disclaimer_lines": 3
+    },
+    "pdf_evidence": {
+      "slip_page": {
+        "orientation": "Portrait A4 (993x1406 px)",
+        "block_size": "807x1115 px",
+        "alignment": "Center X & Y",
+        "auto_trim_padding": true
+      },
+      "summary_page": {
+        "orientation": "Landscape A4 (1406x993 px)",
+        "block_size": "1202x793 px",
+        "font_family": "Sarabun Light / Sarabun Bold",
+        "cell_alignment": "Center Horizontal & Vertical",
+        "table_width": "1202 px"
+      }
+    },
+    "watcher": {
+      "engine_type": "Event-Driven Hot Folder Polling & File Dispatcher",
+      "google_drive_id": "1zIo9YAXDsuxHXCWnFDdBS9hv7r1JvLct",
+      "desktop_inbox_slips": "C:\\Users\\EVE\\OneDrive\\เดสก์ท็อป\\EVIDENCE_IN",
+      "desktop_inbox_chat": "C:\\Users\\EVE\\OneDrive\\เดสก์ท็อป\\EVIDENCE_CHAT_IN",
+      "outbox": "C:\\Users\\EVE\\OneDrive\\เดสก์ท็อป\\Folder_Out",
+      "background_runner": "start_evidence_watcher.vbs (wscript.exe / pythonw.exe)"
+    }
+  }
+}

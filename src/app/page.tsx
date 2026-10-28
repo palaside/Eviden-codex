@@ -29,7 +29,6 @@ import {
   resolveHeaderPageNumber,
   resolveWebHeaderStatus,
   fitCanvasText,
-  type EvidencePageType,
 } from "@/utils/forensic-header-machine";
 import { extractSlipsLocally } from "@/utils/local-qr-extractor";
 import { clearUnreproducedAiNames, findMatchingSlipRecord, getAiFilledFields, mergeAiSlipProposal, projectAiSlipBounds, retainAiOnlyRecordsAfterReprocess, retainSenderNameAfterReprocess } from "@/utils/ai-slip-candidate.mjs";
@@ -161,8 +160,11 @@ export default function MasterEvidenceWorkspace() {
 
   // Real-Time Clock State (Web App Top Header Bar)
   const mounted = useSyncExternalStore(subscribeToHydration, getClientHydrationSnapshot, getServerHydrationSnapshot);
-  const [currentTime, setCurrentTime] = useState<Date>(new Date());
+  // Keep the server and first client render deterministic. The live clock is
+  // started after hydration so the header cannot produce an SSR mismatch.
+  const [currentTime, setCurrentTime] = useState<Date>(() => new Date(0));
   useEffect(() => {
+    setCurrentTime(new Date());
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
@@ -727,11 +729,14 @@ export default function MasterEvidenceWorkspace() {
       const result = await response.json() as {
         success: boolean;
         message?: string;
+        retryable?: boolean;
+        provider_status?: number;
         candidates?: Array<{ bbox_1000: [number, number, number, number]; visual_cues: string[]; data: SlipExtraction }>;
         metadata?: ExtractionMetadata;
       };
       if (!response.ok || !result.success || !result.metadata || !Array.isArray(result.candidates)) {
-        throw new Error(result.message || `API ตอบกลับ ${response.status}`);
+        const retryHint = result.retryable ? " · บริการภายนอกขัดข้องชั่วคราว ลองใหม่ได้" : "";
+        throw new Error(`${result.message || `API ตอบกลับ ${response.status}`}${retryHint}`);
       }
       if (result.metadata.sha256 !== await computeFileSha256(item.file)) {
         throw new Error("SHA-256 ของภาพที่ API ประมวลผลไม่ตรงกับไฟล์ต้นฉบับ");
@@ -849,6 +854,22 @@ export default function MasterEvidenceWorkspace() {
     }
   };
 
+  // Use the local YOLO crop pipeline as a review-only fallback when a chat
+  // page was classified as containing a slip but local QR/OCR found no anchor.
+  // Gemini remains an explicit external-provider action.
+  useEffect(() => {
+    if (loading || aiScanItemId) return;
+    const target = stagedQueue.find((item) => item.status === "done"
+      && item.category === "CHAT"
+      && item.detectType === "TYPE_CHAT_WITH_SLIP"
+      && !item.stitchedIntoItemId
+      && !(item.embeddedSlips?.length)
+      && !autoYoloAttemptedRef.current.has(item.id));
+    if (!target) return;
+    autoYoloAttemptedRef.current.add(target.id);
+    void scanSelectedSlipWithAi(target.id, "yolo");
+  }, [aiScanItemId, loading, scanSelectedSlipWithAi, stagedQueue]);
+
   const saveDuplicateReferenceResolution = (referenceNo: string, resolution: DuplicateReferenceResolution) => {
     setDuplicateReferenceResolutions((current) => ({ ...current, [referenceNo]: resolution }));
   };
@@ -870,6 +891,7 @@ export default function MasterEvidenceWorkspace() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const autoYoloAttemptedRef = useRef<Set<string>>(new Set());
 
   // Select an evidence item from the queue to view on canvas & inspection panels
   const selectEvidenceItem = (index: number, sliceIndex: number = 0) => {
@@ -925,6 +947,9 @@ export default function MasterEvidenceWorkspace() {
 
     const intakeResults = await Promise.all(imageFiles.map(async (file) => {
       try {
+        if (file.size <= 0) {
+          throw new Error("browser ส่งไฟล์ว่าง (0 bytes) จึงอ่านข้อมูลต้นฉบับไม่ได้");
+        }
         const sha256 = await computeFileSha256(file);
         return {
           file,
@@ -943,12 +968,18 @@ export default function MasterEvidenceWorkspace() {
             },
           },
         };
-      } catch {
-        return { file, item: null };
+      } catch (error) {
+        return {
+          file,
+          item: null,
+          error: error instanceof Error ? error.message : "ไม่ทราบสาเหตุการอ่านไฟล์",
+        };
       }
     }));
     const newItems = intakeResults.flatMap((result) => result.item ? [result.item] : []);
-    const failedFiles = intakeResults.filter((result) => !result.item).map((result) => result.file.name);
+    const failedFiles = intakeResults
+      .filter((result) => !result.item)
+      .map((result) => `${result.file.name} (${result.error || "ไม่สามารถอ่านไฟล์ได้"})`);
 
     if (newItems.length === 0) {
       setErrorMsg(`คำนวณ SHA-256 ในเครื่องไม่สำเร็จ จึงยังไม่เพิ่มไฟล์เข้าคิว: ${failedFiles.join(", ")}`);
@@ -1343,6 +1374,16 @@ export default function MasterEvidenceWorkspace() {
           ocrPagesCompleted += 1;
           setBatchProgress({ current: ocrPagesCompleted, total: qrJobPlan.jobs.length, currentFileName: job.fileName, phase: "OCR หน้าไม่ซ้ำทุกไบต์ภายในเครื่อง" });
         }
+      },
+      (phase) => {
+        if (phase !== "ocr") return;
+        ocrPagesCompleted = 0;
+        setBatchProgress({
+          current: 0,
+          total: qrJobPlan.jobs.length,
+          currentFileName: qrJobPlan.jobs[0]?.fileName || "",
+          phase: "เริ่ม OCR หลัง QR pass เสร็จ",
+        });
       },
     );
     const candidatesByQrJob = expandUniquePixelJobResults(qrJobs, qrJobPlan, uniqueQrJobResults);

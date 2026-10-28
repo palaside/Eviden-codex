@@ -1,0 +1,22 @@
+{
+  "google_drive": {
+    "folder_id": "1zIo9YAXDsuxHXCWnFDdBS9hv7r1JvLct",
+    "folder_name": "EVIDENCE",
+    "folder_url": "https://drive.google.com/drive/folders/1zIo9YAXDsuxHXCWnFDdBS9hv7r1JvLct?usp=sharing",
+    "output_subfolder_name": "Folder_Out",
+    "chat_subfolder_name": "CHAT_IN",
+    "slip_subfolder_name": "SLIP_IN"
+  },
+  "local_paths": {
+    "desktop_slip_inbox": "C:\\Users\\EVE\\OneDrive\\เดสก์ท็อป\\EVIDENCE_IN",
+    "desktop_chat_inbox": "C:\\Users\\EVE\\OneDrive\\เดสก์ท็อป\\EVIDENCE_CHAT_IN",
+    "desktop_outbox": "C:\\Users\\EVE\\OneDrive\\เดสก์ท็อป\\Folder_Out",
+    "gdrive_local_candidates": [
+      "G:\\My Drive\\EVIDENCE",
+      "G:\\EVIDENCE",
+      "G:\\",
+      "C:\\Users\\EVE\\Google Drive\\EVIDENCE"
+    ]
+  },
+  "poll_interval_seconds": 5
+}

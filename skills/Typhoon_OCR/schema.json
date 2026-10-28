@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThaiBankSlip10ColumnEvidence",
+  "description": "มาตรฐานโครงสร้างข้อมูลพยานหลักฐานสลิปโอนเงินธนาคารไทย 10 คอลัมน์ สำหรับนำสืบในชั้นศาล",
+  "type": "object",
+  "properties": {
+    "amount": {
+      "type": "string",
+      "description": "ยอดเงินโอน (บาท) พร้อมคอมม่าคั่นและทศนิยม 2 ตำแหน่ง",
+      "example": "35,000.00"
+    },
+    "date": {
+      "type": "string",
+      "description": "วันที่ทำรายการ รูปแบบ DD/MM/YYYY (พ.ศ. 256X หรือ ค.ศ.)",
+      "example": "30/05/2568"
+    },
+    "time": {
+      "type": "string",
+      "description": "เวลาทำรายการ รูปแบบ HH:MM (24 ชั่วโมง)",
+      "example": "14:21"
+    },
+    "sender_bank": {
+      "type": "string",
+      "description": "ชื่อธนาคารผู้โอน (ภาษาไทย)",
+      "example": "กรุงไทย"
+    },
+    "sender_name": {
+      "type": "string",
+      "description": "ชื่อผู้โอนและเลขบัญชีที่ปรากฏบนสลิป",
+      "example": "นายณัฐชัย* XXX-X-XX452-9"
+    },
+    "receiver_bank": {
+      "type": "string",
+      "description": "ชื่อธนาคารผู้รับ (ภาษาไทย)",
+      "example": "ทีเอ็มบีธนชาต (ttb)"
+    },
+    "receiver_name": {
+      "type": "string",
+      "description": "ชื่อผู้รับโอนและเลขบัญชีที่ปรากฏบนสลิป",
+      "example": "น.ส.จิณห์นิภา ประสาทเขตรการ XXX-X-XX996-5"
+    },
+    "remarks": {
+      "type": "string",
+      "description": "รหัสอ้างอิงธุรกรรม / Transaction Reference ID",
+      "example": "Af2cfb29c1f9e40ae"
+    },
+    "memo": {
+      "type": "string",
+      "description": "ข้อความบันทึกช่วยจำ",
+      "example": "ค่าทอง"
+    }
+  },
+  "required": [
+    "amount",
+    "date",
+    "time",
+    "sender_bank",
+    "sender_name",
+    "receiver_bank",
+    "receiver_name",
+    "remarks",
+    "memo"
+  ]
+}

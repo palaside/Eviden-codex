@@ -1,0 +1,34 @@
+<service>
+	<id>digitalevidenceenterprise.exe</id>
+	<name>DigitalEvidenceEnterprise</name>
+	<description>Digital Evidence Enterprise</description>
+	<executable>C:\Program Files\nodejs\node.exe</executable>
+	<argument>--harmony</argument>
+	<argument>D:\Project\Digital Evi - Codex\node_modules\node-windows\lib\wrapper.js</argument>
+	<argument>--file</argument>
+	<argument>D:\Project\Digital Evi - Codex\scripts\enterprise-supervisor.mjs</argument>
+	<argument>--scriptoptions=--port 3450</argument>
+	<argument>--log</argument>
+	<argument>DigitalEvidenceEnterprise wrapper</argument>
+	<argument>--grow</argument>
+	<argument>0.25</argument>
+	<argument>--wait</argument>
+	<argument>1</argument>
+	<argument>--maxrestarts</argument>
+	<argument>3</argument>
+	<argument>--abortonerror</argument>
+	<argument>n</argument>
+	<argument>--stopparentfirst</argument>
+	<argument>undefined</argument>
+	<logmode>rotate</logmode>
+	<stoptimeout>30sec</stoptimeout>
+	<env name="PORT" value="3450"/>
+	<env name="NEXT_DIST_DIR" value="build-output-enterprise"/>
+	<env name="NODE_ENV" value="production"/>
+	<serviceaccount>
+		<domain>DESKTOP-LPENMN2</domain>
+		<user>LocalSystem</user>
+		<password></password>
+	</serviceaccount>
+	<workingdirectory>D:\Project\Digital Evi - Codex</workingdirectory>
+</service>

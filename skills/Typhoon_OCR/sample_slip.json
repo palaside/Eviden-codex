@@ -1,0 +1,14 @@
+{
+  "amount": "35,000.00",
+  "date": "30/05/2568",
+  "time": "14:21",
+  "sender_bank": "กรุงไทย",
+  "sender_name": "นายณัฐชัย* XXX-X-XX452-9",
+  "receiver_bank": "ทีเอ็มบีธนชาต (ttb)",
+  "receiver_name": "น.ส.จิณห์นิภา ประสาทเขตรการ XXX-X-XX996-5",
+  "remarks": "Af2cfb29c1f9e40ae",
+  "memo": "ค่าทอง",
+  "_engine": "OpenTyphoon-2Stage-Thai-Sovereign",
+  "_model": "typhoon-ocr-v1.5",
+  "_hash": "960768354c984f3f06c99d08ce57902b254775d21ac14c99c1950ef87f706da9"
+}

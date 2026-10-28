@@ -1,0 +1,42 @@
+# Node & Next.js
+node_modules/
+.next/
+.next*/
+dist/
+build/
+build-output*/
+out/
+
+# Logs & Environment
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.env
+.env*.local
+.env.production
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv-evidence-export/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# 🛡️ PDPA & Security Shield (Criminal Evidence Protection)
+RAW/
+RAWFILE/
+Folder_Out/
+evidence_store/
+test_images/
+*.tmp
+.tempmediaStorage/
+.user_uploaded/

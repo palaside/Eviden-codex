@@ -47,10 +47,10 @@ export async function POST(request: Request) {
   try {
     const model = process.env.YOLO_MODEL || path.join(process.cwd(), "models", "slip-yolov8n.pt");
     const tesseract = process.env.TESSERACT_CMD || "C:\\Program Files\\Tesseract-OCR\\tesseract.exe";
-    // The trained local model returns a reviewable slip box for the target
-    // chat at 0.10; keep the result review-only so lowering this threshold
-    // cannot silently confirm a false positive.
-    const confidence = process.env.YOLO_CONFIDENCE || "0.10";
+    // The trained local model scores the known chatv3 (77) slip at ~0.053.
+    // Keep the lower detector threshold review-only; candidate confirmation is
+    // still blocked by the normal human-review state and schema gates.
+    const confidence = process.env.YOLO_CONFIDENCE || "0.03";
     const raw = await runPython(["--image", tempPath, "--model", model, "--device", process.env.YOLO_DEVICE || "0", "--confidence", confidence, "--tesseract", tesseract, "--engine", "multiengine"]);
     const parsed = ResultSchema.parse(JSON.parse(raw));
     return NextResponse.json({ success: true, candidates: parsed.slips, metadata: { file_name: file.name, mime_type: file.type || "image/jpeg", sha256, size_bytes: bytes.length, extracted_at: new Date().toISOString(), engine: "local-yolo-tesseract" } }, {

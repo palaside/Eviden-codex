@@ -151,6 +151,25 @@ def decode_qr_from_crop(crop: np.ndarray) -> str | None:
     return None
 
 
+def decode_zxing_from_crop(crop: np.ndarray) -> str | None:
+    """Decode QR from the same YOLO crop without assuming a fixed vertical zone."""
+    height, width = crop.shape[:2]
+    variants = [
+        crop,
+        cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY),
+        crop[: int(height * 0.70)],
+        crop[int(height * 0.10): int(height * 0.80)],
+        crop[int(height * 0.20):],
+        crop[:, : int(width * 0.80)],
+        crop[:, int(width * 0.30):],
+    ]
+    for variant in variants:
+        results = zxingcpp.read_barcodes(variant)
+        if results and results[0].text:
+            return results[0].text
+    return None
+
+
 def enhance_crop_for_ocr(crop: np.ndarray) -> tuple[list[np.ndarray], list[str]]:
     """Apply the browser OCR enhancement stages to one YOLO crop.
 
@@ -231,7 +250,12 @@ def read_multiengine_data(crop: np.ndarray, qr_payload: str | None, use_gpu: boo
         value = entry["text"]
         # Do not promote a low-confidence OCR guess into a ledger field. Thai
         # masked names are especially easy for OCR to hallucinate as a full name.
-        if entry["confidence"] < 0.75 or not re.search(r"(?:นาย|นาง|น\.ส\.|ณัฐชัย|จิณห์นิภา)", value):
+        # Name OCR on the validated ttb crop is readable at ~0.73-0.75.
+        # Keep the lower threshold scoped to name candidates only; the result
+        # remains review-only and is never promoted to a confirmed fact.
+        explicit_honorific = bool(re.search(r"^(?:นาย|นาง|น\.ส\.|นส\.)\s*", value))
+        minimum_name_confidence = 0.30 if explicit_honorific else 0.70
+        if entry["confidence"] < minimum_name_confidence or not re.search(r"(?:นาย|นาง|น\.ส\.|ณัฐชัย|จิณห์นิภา)", value):
             continue
         if value.strip() in honorific_only and index + 1 < len(entries):
             next_entry = entries[index + 1]
@@ -247,7 +271,10 @@ def read_multiengine_data(crop: np.ndarray, qr_payload: str | None, use_gpu: boo
     ]
     time = None
     time_confidence = 0.0
-    if time_candidates and time_candidates[0]["confidence"] >= 0.70:
+    # Date/time boxes can have lower OCR confidence because Thai date glyphs
+    # and decorative backgrounds share one detection box. Keep this value as
+    # a review-only proposal when the time token itself is present.
+    if time_candidates and time_candidates[0]["confidence"] >= 0.45:
         time = re.search(r"\b([0-2]?\d:[0-5]\d)\b", time_candidates[0]["text"]).group(1)
         time_confidence = time_candidates[0]["confidence"]
     references = re.findall(r"20\d{16}", joined)
@@ -319,10 +346,7 @@ def main() -> None:
         crop = detection["crop"]
         qr_payload = decode_qr_from_crop(crop)
         if args.engine == "multiengine":
-            height, width = crop.shape[:2]
-            qr_zone = crop[int(height * 0.65): int(height * 0.85), int(width * 0.60):]
-            qr_results = zxingcpp.read_barcodes(cv2.cvtColor(qr_zone, cv2.COLOR_BGR2GRAY))
-            qr_payload = qr_results[0].text if qr_results else None
+            qr_payload = decode_zxing_from_crop(crop) or qr_payload
             data = read_multiengine_data(crop, qr_payload, use_gpu=args.device not in ("cpu", "-1"))
             lines = data["raw_text"]
         else:

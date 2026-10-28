@@ -1,0 +1,31 @@
+{
+  "project_name": "DIGITAL_EVIDENCE",
+  "version": "1.0.0",
+  "description": "Criminal Case Digital Evidence Forensic Dossier Preparation & Legal Packaging Suite",
+  "author_role": "SENIOR FULL-STACK DEVELOPER AGENT",
+  "created_at": "2026-09-28T01:20:00+07:00",
+  "status": "PRODUCTION_READY",
+  "framework": {
+    "frontend": "Next.js 16.3.6 (Turbopack) + React 19.2.8 + TailwindCSS 4",
+    "canvas_engine": "Canvas 2D HTML5 Forensic Slicer & Renderer",
+    "ocr_engine": "OpenTyphoon OCR API + Client-side jsQR + Canvas Heuristics",
+    "packaging": "WinRAR SFX Encrypted Vault (.exe -hp) + Native Print A4 PDF"
+  },
+  "git": {
+    "remote_url": "https://github.com/DigitalEvidence/digital-evidence.git",
+    "primary_branch": "main",
+    "tags": ["v1.0.0"]
+  },
+  "runtime": {
+    "port": 3453,
+    "entry_point": "digital-evidence/src/app/page.tsx",
+    "launcher_script": "RUN_DIGITAL_EVIDENCE.bat",
+    "local_url": "http://localhost:3453"
+  },
+  "security_shields": {
+    "pdpa_masking": true,
+    "sha256_hash_manifest": true,
+    "password_sfx_lock": true,
+    "zero_blank_screen": true
+  }
+}

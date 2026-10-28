@@ -1,0 +1,6 @@
+# Install in the Python environment configured by PYTHON_EXECUTABLE.
+# opencv-contrib provides dnn_superres; use headless for the server process.
+opencv-contrib-python-headless==4.12.0.88
+numpy==2.2.6
+Pillow==12.3.0
+reportlab==5.0.1

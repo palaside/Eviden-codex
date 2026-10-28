@@ -1,0 +1,201 @@
+ด้านล่างคือ Master Project Replicability Blueprint จากการตรวจสถานะจริงของโปรเจกต์ digital-evidence ณ รอบนี้ ครับ
+ขอบเขตที่ตรวจ: digital-evidence/package.json, config, src/, public/, scripts/, component/type/schema/API หลัก
+ขอบเขตที่ไม่อ่าน: .env.local, RAWFILE/, node_modules/, .next/, ไฟล์หลักฐานจริง และข้อมูลลับ
+ส่วนที่ 1: Project Overview & Tech Stack
+- ชื่อโปรเจกต์: digital-evidence
+- ชนิดแอป: Next.js forensic evidence dashboard / local-first evidence staging workspace
+- Runtime: Next.js 16.3.6, React 19.2.8, TypeScript strict, Tailwind CSS v4 via PostCSS
+- Dependencies หลัก: jsqr สำหรับ QR scan, zod สำหรับ validation schema
+- Dev scripts: dev, build, start, lint
+- Server ปัจจุบัน: next dev -p 3435 ยังรันอยู่ที่ http://localhost:3435
+- Config สำคัญ: [next.config.ts](D:\\Project\\Digital Evi - Codex\\digital-evidence\\next.config.ts) ตั้ง Turbopack root แบบ absolute และ webpack watch polling กันปัญหา Windows drive
+- Entrypoint หลัก: [page.tsx (line 44)](D:\\Project\\Digital Evi - Codex\\digital-evidence\\src\\app\\page.tsx:44) export MasterEvidenceWorkspace
+digital-evidence/
+├── package.json
+├── next.config.ts
+├── tsconfig.json
+├── eslint.config.mjs
+├── postcss.config.mjs
+├── public/
+│   ├── BG.png
+│   ├── LOGO.png
+│   └── *.svg
+├── scripts/
+│   └── name_detector.js
+└── src/
+    ├── app/
+    │   ├── layout.tsx
+    │   ├── page.tsx
+    │   ├── globals.css
+    │   └── api/
+    │       ├── upload/route.ts
+    │       └── slips/
+    │           ├── extract/route.ts
+    │           ├── typhoon/route.ts
+    │           └── validate/route.ts
+    ├── components/
+    │   ├── CourtCoverSheet.tsx
+    │   ├── ExecutiveSummarySheet.tsx
+    │   ├── HashManifestTable.tsx
+    │   ├── MasterDossierFullBook.tsx
+    │   ├── HeaderA4.tsx
+    │   ├── UploadZone.tsx
+    │   ├── GlassCard.tsx
+    │   ├── GlassButton.tsx
+    │   ├── LedgerColumnToggle.tsx
+    │   └── ModeSelectorPanel.tsx
+    ├── constants/forensic-ssot.ts
+    ├── schemas/slip.schema.ts
+    ├── utils/
+    │   ├── detect-image-type.ts
+    │   ├── local-qr-extractor.ts
+    │   ├── typhoon-ocr.ts
+    │   ├── forensic-sha256-cache.ts
+    │   ├── target-matcher.ts
+    │   ├── privacy-mask.ts
+    │   ├── canvas-dicut-chat.ts
+    │   └── forensic-header-machine.ts
+    ├── hooks/useSessionPersistence.ts
+    ├── types/
+    │   ├── slip.ts
+    │   └── cover-sheet.ts
+    ├── styles/layout-framework.css
+    ├── styles/headerA4.css
+    ├── data/thai_law_master_reference.json
+    └── pages/api/ledger.ts
+ส่วนที่ 2: Navigation & Layout Architecture
+/
+└── MasterEvidenceWorkspace
+    ├── Header: logo/time/date/status
+    ├── Left Column: upload, workflow, staging/target controls
+    ├── Center Column: EVIDENCE_A4 | COVER_PAGE | HASH_MANIFEST | EXECUTIVE_SUMMARY
+    ├── Right Column: summary, legal packaging, PDPA, export/action panels
+    └── Modal Layer
+        ├── review modal
+        ├── ledger modal
+        ├── linkage modal
+        ├── SFX vault modal
+        ├── legal context modal
+        ├── detected names modal
+        └── full book dossier modal
+- Layout engine: 3-tier shell จาก [layout-framework.css](D:\\Project\\Digital Evi - Codex\\digital-evidence\\src\\styles\\layout-framework.css)
+  app-fit-shell → shell-header → shell-workspace → shell-footer
+- Main grid: workspace-3col-grid
+  - ซ้าย: clamp(340px, 22vw, 440px)
+  - กลาง: minmax(480px, 1fr)
+  - ขวา: clamp(340px, 22vw, 440px)
+- Density: compact operational dashboard, no page-level scroll, scroll เฉพาะ panel body
+- Eye flow: operational F-pattern; left intake/control → center evidence canvas → right summary/export
+- Page modes จริงใน state: EVIDENCE_A4, COVER_PAGE, HASH_MANIFEST, EXECUTIVE_SUMMARY
+ส่วนที่ 3: UI Component Inventory & Design Tokens
+Global tokens อยู่ใน [globals.css](D:\\Project\\Digital Evi - Codex\\digital-evidence\\src\\app\\globals.css) และ [layout-framework.css](D:\\Project\\Digital Evi - Codex\\digital-evidence\\src\\styles\\layout-framework.css)
+- Typography:
+  - Body: Sarabun, fallback Segoe UI, Roboto, sans-serif
+  - Next font loaded: Geist, Geist_Mono ใน [layout.tsx](D:\\Project\\Digital Evi - Codex\\digital-evidence\\src\\app\\layout.tsx)
+  - Thai clearance: line-height: 1.6, thai-clearance-stack
+- Geometry:
+  - Glass cards: radius 12px
+  - Modals: radius 16px
+  - Inputs/buttons: radius 8px
+  - A4 canvas spec: 993 x 1406 px, 150 DPI intent, จาก [forensic-ssot.ts](D:\\Project\\Digital Evi - Codex\\digital-evidence\\src\\constants\\forensic-ssot.ts)
+- Palette:
+  - Deep base: #070a0f, #0b0f17
+  - Text: #f8fafc, muted #94a3b8, dim #64748b
+  - Accent: cyan #38bdf8, emerald #34d399, amber #f59e0b, danger #f87171
+  - Effects: backdrop-filter: blur(20px) saturate(180%), cyan/emerald glow, nested glass without repeated blur
+- Components:
+  - GlassCard, GlassButton: generic glass wrappers
+  - UploadZone: file intake UI
+  - CourtCoverSheet: court dossier cover from CourtCoverSheetData
+  - HashManifestTable: SHA-256 file manifest
+  - ExecutiveSummarySheet: evidence summary from ForensicEvidenceState
+  - MasterDossierFullBook: multi-page dossier presentation
+  - HeaderA4: document header using headerConfig
+  - LedgerColumnToggle: persisted/visible ledger columns
+  - ModeSelectorPanel: mode chooser using ModeContext
+ส่วนที่ 4: Data Model, API & State Schema
+แกน state จริงใน [page.tsx (line 45)](D:\\Project\\Digital Evi - Codex\\digital-evidence\\src\\app\\page.tsx:45):
+{
+  currentStep,
+  evidenceMode: "CHAT" | "SLIP",
+  centerView: "EVIDENCE_A4" | "COVER_PAGE" | "HASH_MANIFEST" | "EXECUTIVE_SUMMARY",
+  targetName,
+  pdpaEnabled,
+  caseNumber,
+  loading,
+  previewImage,
+  extractedData,
+  metadata,
+  manifestList,
+  targetList,
+  evidenceState,
+  stagedQueue,
+  selectedItemIndex,
+  selectedSliceIndex,
+  batchProgress,
+  modalFlags,
+  legalSearchQuery,
+  legalCategoryFilter,
+  vaultPassword,
+  errorMsg
+}
+PURE_ZERO_STATE จริง:
+{
+  "totalNetLoss": 0,
+  "slipCount": 0,
+  "chatPageCount": 0,
+  "poiName": null,
+  "poiLossSum": 0,
+  "corroboratedPairsCount": 0,
+  "duplicateCount": 0,
+  "processedAt": null
+}
+API endpoints:
+- POST /api/upload: รับ files[], เขียนลง RAWFILE/; ยังไม่มี filename sanitization ที่ตรวจพบจากไฟล์ route
+- POST /api/slips/extract: multipart หรือ base64 image → Gemini Vision → Zod validate → คืน SlipExtraction + metadata
+- POST /api/slips/typhoon: multipart image → Typhoon OCR; ถ้าล้มเหลวคืน fallback: true
+- POST /api/slips/validate: validate JSON กับ SlipExtractionSchema
+- GET /api/ledger?mode=SLIP: pages router API, ปัจจุบันเป็น mock คืน array ว่าง
+Data-flow lifecycle:
+1. User drops/selects image files
+2. stageIncomingFiles() filters image → detectImageType()
+3. CHAT → sliceChatImageLocally(); SLIP → SHA-256 + local cache + jsQR local extractor
+4. Background enrichment → /api/slips/extract
+5. Batch execute → slips first, chats next, cross-match POI, update manifest/state
+6. Render center A4/cover/hash/summary and modal reports
+7. PDPA toggle applies maskAccountNumber() / maskPersonName()
+ส่วนที่ 5: Step-by-Step Project Reconstruct Guide
+Phase 1: Scaffold
+- Create Next.js App Router app with TypeScript strict, Tailwind v4, React 19, Next 16
+- Add dependencies: jsqr, zod
+- Configure @/* -> ./src/*, Turbopack root, webpack watch polling for Windows
+- Add public assets BG.png, LOGO.png
+Phase 2: Design System
+- Implement globals.css glass tokens first
+- Implement no-scroll 3-column shell in layout-framework.css
+- Build reusable GlassCard, GlassButton, UploadZone, HeaderA4
+- Enforce A4 canvas geometry from FORENSIC_CANVAS_SPEC
+Phase 3: State & Logic
+- Implement SlipExtractionSchema with Zod gates
+- Implement useSessionPersistence() with digital_evi_ localStorage prefix
+- Implement detectImageType(), computeFileSha256(), local jsQR extraction, Typhoon→Gemini OCR fallback
+- Implement target-matcher zero-prefix stripping and phonetic Thai matching
+- Keep PURE_ZERO_STATE; do not hardcode sample evidence
+Phase 4: Validation & Tests
+- Unit tests: Zod schema accepts/rejects payloads; privacy masking; target matching; SHA-256 cache
+- API tests: missing file, missing API key, invalid AI JSON, invalid schema, success payload
+- UI tests: empty state, upload staging, batch progress, mode switch, PDPA masking, modal open/close
+- Integration tests: local QR slip, non-QR OCR fallback, chat slicing, manifest generation
+- Real user flow: browser upload sample image → process → view A4 → cover/hash/summary → print/export path
+Prompt ส่งต่อให้ AI Agent โคลนระบบ
+Build a Next.js App Router forensic evidence dashboard named digital-evidence. Use TypeScript strict, React 19, Next 16, Tailwind v4, zod, and jsqr. Recreate a no-scroll 3-column glassmorphism operational workspace with left intake/control panel, center A4 evidence viewport, and right summary/export/legal panel. Implement PURE_ZERO_STATE, stagedQueue, local SHA-256 cache, session persistence, slip/chat image classifier, local jsQR slip extraction, Typhoon OCR with Gemini fallback API routes, Zod SlipExtractionSchema validation, POI zero-prefix Thai name matching, PDPA masking, court cover sheet, hash manifest table, executive summary, and full dossier modal. Do not invent evidence data. Do not read or display secrets. Treat RAWFILE as local evidence storage. Add tests for schema, API guards, matching, masking, cache, and a browser flow for upload→process→render.
+Final Report
+- Summary: ทำ blueprint จาก source/config จริงของ digital-evidence; ไม่ได้แก้ไฟล์
+- Changed Files: ไม่มี
+- Verification Status:
+  - Tier 1 Static Check: ยังไม่ได้รัน lint/typecheck/build
+  - Tier 2 Logic/API Check: ตรวจจาก source contracts และ route code; ยังไม่ได้ยิง API payload ทดสอบ
+  - Tier 3 Integration Check: server ที่พอร์ต 3435 เคยตรวจ GET / 200 ในรอบก่อนและยังไม่ได้ปิดในรอบนี้; รอบนี้ไม่ได้ยิงซ้ำ
+  - Tier 4 Real User Flow Check: ยังไม่ได้ทดสอบ browser flow/upload จริง เพราะไม่ได้รับคำสั่งให้ควบคุม browser เพิ่ม
+- Untested Areas: OCR จริงกับไฟล์ภาพ, upload เขียน RAWFILE, modal interaction, export/print, lint/build
+- Risks/Next Steps: /api/ledger ยังเป็น mock; /api/upload เขียนชื่อไฟล์ตาม input; OCR routes ต้องมี keys ใน .env.local แต่ผมไม่ได้อ่าน secrets; metadata ของ layout.tsx ยังเป็น Create Next App ตาม source ที่ตรวจพบ

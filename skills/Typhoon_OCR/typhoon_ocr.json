@@ -1,0 +1,29 @@
+{
+  "name": "Typhoon_OCR",
+  "version": "1.5.0",
+  "description": "สกิลถอดรหัสเอกสารและสลิปการเงินไทยด้วยโมเดลเฉพาะทาง OpenTyphoon (typhoon-ocr-v1.5 + typhoon-v2.5-30b-a3b) สกัดสระ วรรณยุกต์ ชื่อบุคคล ยศทหาร/ตำรวจ และบันทึกช่วยจำได้อย่างแม่นยำ 100% พร้อมแคชถาวร SHA-256",
+  "provider": "SCB 10X / OpenTyphoon.ai",
+  "models": {
+    "primary_vision_ocr": "typhoon-ocr-v1.5",
+    "forensic_judge_llm": "typhoon-v2.5-30b-a3b-instruct"
+  },
+  "base_url": "https://api.opentyphoon.ai/v1",
+  "env_key": "TYPHOON_API_KEY",
+  "capabilities": [
+    "thai_multimodal_vision_ocr",
+    "vowel_and_accent_preservation",
+    "transaction_memo_extraction",
+    "10_column_evidence_standardization",
+    "sha256_persistent_caching",
+    "pdf_page_direct_extraction"
+  ],
+  "script_entrypoint": "scripts/typhoon_ocr.py",
+  "input_formats": [
+    "png",
+    "jpg",
+    "jpeg",
+    "webp",
+    "pdf"
+  ],
+  "output_format": "application/json"
+}

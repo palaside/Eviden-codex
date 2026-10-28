@@ -1,0 +1,23 @@
+import { chromium } from "@playwright/test";
+import fs from "node:fs/promises";
+import path from "node:path";
+
+const root = process.cwd();
+const outDir = path.resolve(root, "For Test Results", "ledger-debug-3450");
+const fixture = path.resolve(root, "For Test", "แชทที่ 3", "chatv3 (77).jpg");
+await fs.mkdir(outDir, { recursive: true });
+const browser = await chromium.launch({ headless: true, executablePath: process.env.E2E_BROWSER_EXECUTABLE || undefined });
+const page = await browser.newPage({ viewport: { width: 1662, height: 1548 } });
+await page.goto("http://127.0.0.1:3450/", { waitUntil: "domcontentloaded" });
+await page.getByText("PURE ZERO STATE", { exact: true }).waitFor({ state: "visible", timeout: 60_000 });
+await page.locator("#evidence-file-input").setInputFiles(fixture);
+await page.getByRole("button", { name: /เริ่มประมวลผลพยานหลักฐาน/ }).click();
+await page.waitForFunction(() => !/กำลังประมวลผลแบบ Cross-Matching|กำลังสกัดพยานหลักฐานระดับพิกเซล/.test(document.body?.innerText || ""), undefined, { timeout: 300_000 });
+const bodyText = await page.locator("body").innerText();
+const buttons = await page.locator("button").allTextContents();
+const inputs = await page.locator("input").evaluateAll((nodes) => nodes.map((node) => ({ type: node.type, value: node.value, placeholder: node.placeholder, disabled: node.disabled })));
+await fs.writeFile(path.join(outDir, "body.txt"), bodyText, "utf8");
+await fs.writeFile(path.join(outDir, "controls.json"), JSON.stringify({ buttons, inputs }, null, 2), "utf8");
+await page.screenshot({ path: path.join(outDir, "after-process.png"), fullPage: true });
+console.log(JSON.stringify({ outDir, buttons, xlsxButtonVisible: await page.getByRole("button", { name: "ดาวน์โหลด XLSX 13 คอลัมน์", exact: true }).count() > 0, slipText: bodyText.match(/สลิปที่ตรวจพบ[^\n]*/g) }, null, 2));
+await browser.close();

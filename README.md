@@ -2,37 +2,51 @@
 
 ## Purpose
 
-Workspace for organizing digital evidence, processing chat and bank-slip images, reviewing OCR/QR-derived candidates, and preparing evidence documents. Automated extraction is decision support; uncertain values remain pending human review.
+เว็บแอปสำหรับช่วยคัดกรองหลักฐานดิจิทัล โดยรักษาต้นฉบับและ provenance แล้วเชื่อมผล OCR/QR กับ candidate, review state และสัญญาณข้อความที่อาจเกี่ยวข้องทางกฎหมาย สัญญาณเหล่านี้เป็นเพียง leads สำหรับมนุษย์ตรวจทาน ไม่ใช่การตัดสินว่าบุคคลใดผิดหรือไม่ผิด
 
-## Project Layout
+## Source Of Truth
 
-| Path | Role |
-| --- | --- |
-| `src/`, `scripts/`, `package.json` | Active root Next.js 16 / React 19 application, TypeScript UI, local OCR/QR pipeline, legal signal scan, tests, and export routes. |
-| `digital-evidence/` | Alternate/legacy checkout; do not use for the active runtime unless a task explicitly names it. |
-| `core/`, root `scripts/`, `static/` | Python/PIL and legacy evidence-processing components. Their relationship to the browser OCR path is not assumed. |
-| `docs/`, root `PROJECT_STATUS.md`, `PROJECT_FLOW.md` | Plans, current evidence-based status, and system flow. |
-| `skills/`, `.agents/` | Agent guidance and project skills; these documents are not runtime hooks by themselves. |
-| `For Test/`, `For Test Results/`, `RAW/`, `RAWFILE/` | Evidence fixtures and user/runtime data. Preserve unless cleanup is separately requested. |
-| `_workspaces/` | Alternate copies. Confirm the intended checkout before editing. |
+ให้รันและพัฒนาจาก repository root นี้เท่านั้น:
 
-## Current Focus
+`D:\Project\Digital Evi - Codex`
 
-The latest verified UI flow separates a user-reviewed recipient name from the original OCR conflict, persists that review with its source queue, and restores it after reload without confirming financial data. Details, test evidence, and remaining limits are in [PROJECT_STATUS.md](PROJECT_STATUS.md). The browser flow is documented in [PROJECT_FLOW.md](PROJECT_FLOW.md).
+โฟลเดอร์ `digital-evidence/` เป็น checkout เดิม/ทางเลือก และไม่ใช่ runtime หลัก เว้นแต่ task จะระบุเป็นอย่างอื่น ดูรายละเอียดใน [SOURCE_OF_TRUTH.md](SOURCE_OF_TRUTH.md)
 
-## Run the Web App
+## Stack
 
-```powershell
-Set-Location "D:\Project\Digital Evi - Codex"
-npm run dev
+- Next.js `16.3.6`, React `19.2.8`, TypeScript `5.x`
+- Client-side evidence workspace ใน `src/app/page.tsx`
+- OCR/QR utilities และ evidence pipeline ใน `src/utils/`
+- API routes ใน `src/app/api/`
+- RAW legal reference snapshot ใน `src/data/raw_thai_law_master_reference.json`
+- FourCorners T-LEX ผ่าน server route `/api/legal/tlex`
+- Scripts: `npm run dev`, `npm run build`, `npm run start`, `npm run lint`
+
+## Main Flow
+
+```text
+source image/PDF -> upload/staging -> OCR/QR/candidate processing
+-> page, bbox, confidence, hash and provenance
+-> deterministic legal signal -> human review
+-> optional FourCorners legal research with citations
 ```
 
-Use the URL/port printed by Next.js; do not assume a previously used port serves the current checkout.
+## Resume Development
 
-## Resume Work
+1. เปิด PowerShell ที่ `D:\Project\Digital Evi - Codex`
+2. ตรวจ `SOURCE_OF_TRUTH.md` และ `PROJECT_STATUS.md`
+3. รัน `npm install` เฉพาะเมื่อ dependency ไม่พร้อม
+4. รัน `npm run dev -- --port 3450`
+5. ตรวจ flow จริงผ่าน `http://127.0.0.1:3450/`
+6. อ่าน `PROJECT_FLOW.md` สำหรับ data flow และข้อจำกัดด้าน human review
 
-1. Read root `AGENTS.md` and `digital-evidence/AGENTS.md`.
-2. Read `PROJECT_STATUS.md` for verified behavior and open gaps.
-3. Confirm the active app copy, runtime, and evidence inputs before reproducing a defect.
-4. Preserve source images, hashes, raw OCR, QR evidence, coordinates, and uncertainty. Add focused regression coverage before changing extraction logic.
-5. Keep OCR conflicts, user-reviewed values, and explicit ledger confirmation as distinct states.
+## Verification Snapshot
+
+- `npx tsc --noEmit`: ผ่านในรอบล่าสุด
+- Targeted ESLint: ผ่านโดยมี warnings เดิม 8 รายการ
+- Matcher/evidence diagnostic tests: ผ่านรวม 5 tests
+- Browser flow: พบ OCR legal signal จากหลักฐานจริงและเปิดกลับไปหน้าหลักฐานได้
+- FourCorners: เคยตอบพร้อม citation แต่รอบล่าสุดติด quota ภายนอก จึงไม่ควรเหมารวมว่าพร้อมตลอดเวลา
+- RAW legal reference: ถูกนำเข้ามาเป็นอีก source ของ review-only matcher พร้อม provenance/version
+
+สถานะเต็มอยู่ใน [PROJECT_STATUS.md](PROJECT_STATUS.md)
