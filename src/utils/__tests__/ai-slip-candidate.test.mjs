@@ -55,6 +55,21 @@ test("AI fills a blank string field while preserving masked OCR values", () => {
   assert.deepEqual(getAiFilledFields(local, ai), ["sender.name"]);
 });
 
+test("YOLO review retry replaces an unreviewed conflicting name but never a reviewed name", () => {
+  const local = slip(26400, null);
+  local.receiver = { name: "วิณห์นิภา ประสาทเขตรการ", bank: "ทีเอ็มบีธนชาต", account_no: "XXX-X-XX996-5" };
+  const ai = slip(26400, null);
+  ai.receiver = { name: "จิณห์นิภา ประสาทเขตรการ", bank: "ทีเอ็มบีธนชาต", account_no: "XXX-X-XX996-5" };
+
+  const proposed = mergeAiSlipProposal(local, ai, { replaceUnreviewedConflicts: true });
+  assert.equal(proposed.receiver.name, "จิณห์นิภา ประสาทเขตรการ");
+  assert.match(proposed.warnings.join(" "), /ขัดกัน|รอตรวจ/);
+
+  local.reviewed_fields = ["receiver_name"];
+  const reviewed = mergeAiSlipProposal(local, ai, { replaceUnreviewedConflicts: true });
+  assert.equal(reviewed.receiver.name, "วิณห์นิภา ประสาทเขตรการ");
+});
+
 test("merging a SlipVision retry keeps provider warnings for later review", () => {
   const local = slip(8000, "น.ส. ผู้โอน");
   const ai = slip(8000, "น.ส. ผู้โอน");

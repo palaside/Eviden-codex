@@ -120,7 +120,7 @@ test("does not retain a mislabeled chat bubble from amount and bank OCR alone", 
   }), []);
 });
 
-test("does not promote a chat bubble even when OCR also finds an account-like token", () => {
+test("keeps a strong review-only TTB-shaped region when OCR also finds an account-like token", () => {
   const region = {
     bounds: { x0: 401, y0: 150, x1: 783, y1: 583 },
     amount: 7200,
@@ -140,7 +140,7 @@ test("does not promote a chat bubble even when OCR also finds an account-like to
       bounds: { x: 416, y: 126, width: 352, height: 462 },
     }],
     qrCandidates: [],
-  }), []);
+  }), [region]);
 });
 
 test("keeps strong partial OCR for manual review when it overlaps an image object", () => {

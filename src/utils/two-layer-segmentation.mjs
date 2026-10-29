@@ -129,7 +129,21 @@ export function segmentOcrTextLines(lines, imageSize, visualCandidates = []) {
     bounds: marker.bounds,
   }));
 
-  return { layer1: [...layer1, ...visualLayer, ...timestampLayer], layer2 };
+  const completeLayer1 = [...layer1, ...visualLayer, ...timestampLayer];
+  const searchableTextOverlay = layer2.map((item, index) => ({
+    id: `searchable-text-${index + 1}`,
+    text: item.text,
+    bounds: item.bounds,
+    confidence: item.confidence,
+    groupId: item.groupId,
+    searchable: true,
+  }));
+  return {
+    schemaVersion: "digital-evidence.two-layer.v2",
+    layer1: completeLayer1,
+    layer2,
+    searchableTextOverlay,
+  };
 }
 
 function isStandaloneTimeMarker(text) {

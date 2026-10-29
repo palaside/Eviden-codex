@@ -849,6 +849,21 @@ test("reads the June date when OCR mistakes มิ.ย. for บิ.ย.", () => 
   assert.equal(candidate.time, "14:45");
 });
 
+test("reads compact OCR time when Thai month punctuation is dropped", () => {
+  const [candidate] = findSlipOcrRegions([
+    line("โอนเงินสําเร็จ", 100),
+    line("รหัสอ้างอิง: 202506171502627774", 130),
+    line("ttb", 180),
+    line("7,200.00", 320),
+    line("17 มิย.68.1551น.", 380),
+  ], { width: 807, height: 1115 }, { qrAnchor: { x: 400, y: 500 } });
+
+  assert.ok(candidate);
+  assert.equal(candidate.date, "2025-06-17");
+  assert.equal(candidate.time, "15:51");
+  assert.equal(candidate.dateTimeSource, "ocr");
+});
+
 test("does not pair date, bank, or reference from a distant transaction with the QR slip amount", () => {
   const [candidate] = findSlipOcrRegions([
     line("โอนเงินสําเร็จ", 100),
@@ -916,4 +931,10 @@ test("OCR crop names with repeated prefixes group together while every source pa
   assert.equal(summary.groups.length, 1);
   assert.equal(summary.groups[0].totalAmount, 8000);
   assert.deepEqual(summary.groups[0].records.map(({ chatPage, dossierPage }) => ({ chatPage, dossierPage })), pageReferences);
+});
+test("does not treat the QR footer instruction as a recipient name", () => {
+  const result = findRecipientName([
+    { text: "ผู้รับเงินสามารถสแกนคิวอาร์", confidence: 93, bbox: { x0: 10, y0: 10, x1: 240, y1: 32 } },
+  ]);
+  assert.equal(result.name, null);
 });

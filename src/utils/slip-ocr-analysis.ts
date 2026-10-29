@@ -36,6 +36,8 @@ export interface SlipOcrRegion {
   senderBankName: string | null;
   receiverBankName: string | null;
   rawText: string;
+  /** The region was parsed from a visually detected image crop, not chat text alone. */
+  visualCropEvidence?: boolean;
   ocrLineEvidence: Array<{
     text: string;
     confidence: number;
@@ -134,7 +136,7 @@ function parseThaiDateTime(lines: OcrTextLine[]): { date: string | null; time: s
   const months: Record<string, string> = {
     "ม.ค.": "01", "มกราคม": "01", "ก.พ.": "02", "กุมภาพันธ์": "02",
     "มี.ค.": "03", "มีนาคม": "03", "เม.ย.": "04", "เมษายน": "04",
-    "พ.ค.": "05", "พฤษภาคม": "05", "มิ.ย.": "06", "บิ.ย.": "06", "มิถุนายน": "06",
+    "พ.ค.": "05", "พฤษภาคม": "05", "มิ.ย.": "06", "มิย.": "06", "บิ.ย.": "06", "มิถุนายน": "06",
     "ก.ค.": "07", "กรกฎาคม": "07", "ส.ค.": "08", "สิงหาคม": "08",
     "ก.ย.": "09", "กันยายน": "09", "ต.ค.": "10", "ตุลาคม": "10",
     "พ.ย.": "11", "พฤศจิกายน": "11", "ธ.ค.": "12", "ธันวาคม": "12",
@@ -146,11 +148,13 @@ function parseThaiDateTime(lines: OcrTextLine[]): { date: string | null; time: s
     const monthIndex = text.indexOf(monthName);
     const dayMatch = text.slice(0, monthIndex).match(/(\d{1,2})\s*$/);
     const afterMonth = text.slice(monthIndex + monthName.length);
-    const dateTail = afterMonth.match(/^\s*(\d{2,4})(?:\D{0,12}(\d{1,2}):(\d{2}))?/);
+    const dateTail = afterMonth.match(/^\s*(\d{2,4})(?:\D{0,12}(?:(\d{1,2}):(\d{2})|(\d{4})(?=\D|$)))?/);
     if (!dayMatch || !dateTail) continue;
     const month = months[monthName];
     const [, dayText] = dayMatch;
-    const [, yearText, hourText, minuteText] = dateTail;
+    const [, yearText, colonHourText, colonMinuteText, compactTimeText] = dateTail;
+    const hourText = colonHourText ?? compactTimeText?.slice(0, 2);
+    const minuteText = colonMinuteText ?? compactTimeText?.slice(2, 4);
     const yearNumber = Number(yearText);
     const year = yearNumber < 100
       ? yearNumber >= 50 ? 1957 + yearNumber : 2000 + yearNumber
@@ -213,7 +217,7 @@ function isAlignedWithAmountRow(line: OcrTextLine, amountLine: OcrTextLine): boo
 function isPlausibleRecipientName(text: string): boolean {
   const value = text.trim().replace(/^[\s:：|\-]+|[\s|]+$/g, "");
   if (value.length < 3 || value.length > 80 || /\d/.test(value)) return false;
-  if (/จ[ํำ]านวนเงิน|ยอดเงิน|ค่าธรรมเนียม|รหัสอ้างอิง|เลขที่อ้างอิง|ธนาคาร|บัญชี|โอนเงิน|สำเร็จ/i.test(value)) return false;
+  if (/จ[ํำ]านวนเงิน|ยอดเงิน|ค่าธรรมเนียม|รหัสอ้างอิง|เลขที่อ้างอิง|ธนาคาร|บัญชี|โอนเงิน|สำเร็จ|สามารถสแกน|คิวอาร์|ตรวจสอบสถานะ/i.test(value)) return false;
   return /[\u0E00-\u0E7F]|[a-z]{2}/i.test(value);
 }
 

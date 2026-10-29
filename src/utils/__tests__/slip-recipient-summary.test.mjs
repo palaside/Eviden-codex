@@ -105,6 +105,37 @@ test("withholds a recipient name from person totals when focused OCR retries con
   assert.equal(summary.unassignedRecords[0].amount, 1000);
 });
 
+test("exposes all recipient OCR variants from the same evidence region without selecting one", () => {
+  const nameBox = { text: "วิณห์นิภา ประสาทเขตรการ", confidence: 0.91, bounds: { x: 100, y: 100, width: 300, height: 30 }, classification: "slip_evidence", supportsFields: ["receiver_name"] };
+  const summary = summarizeDetectedSlipRecipients([
+    record("variant-slip", "วิณห์นิภา ประสาทเขตรการ", 26400, {
+      ocrTextBoxes: [nameBox],
+      ocrDiagnosticTrace: {
+        attempts: [
+          { scope: "qr_crop", trigger: "initial", lines: [{ ...nameBox, id: "qr", confidence: 91 }] },
+          { scope: "recipient_retry", trigger: "recipient_missing", lines: [{ ...nameBox, id: "retry-a", text: "จัณหนิภา ประสาทเขตรการ", confidence: 88 }] },
+          { scope: "recipient_retry", trigger: "recipient_missing", lines: [{ ...nameBox, id: "retry-b", text: "จิณห์นิภา ประสาทเขตรการ", confidence: 86 }] },
+        ],
+      },
+      data: {
+        receiver: { name: "วิณห์นิภา ประสาทเขตรการ", account_no: "XXX-X-XX996-5" },
+        transaction: { amount: 26400 },
+        confidence: { receiver_name: 0.91 },
+        warnings: ["OCR ตรวจชื่อผู้รับซ้ำแล้วได้ผลต่างกัน ต้องตรวจจากภาพต้นฉบับ"],
+      },
+    }),
+  ]);
+
+  const conflicted = summary.unassignedRecords[0];
+  assert.deepEqual(conflicted.ocrRecipientVariants, [
+    "วิณห์นิภา ประสาทเขตรการ",
+    "จัณหนิภา ประสาทเขตรการ",
+    "จิณห์นิภา ประสาทเขตรการ",
+  ]);
+  assert.equal(conflicted.receiverNameOcrConflict, true);
+  assert.equal(conflicted.receiverNameManuallyReviewed, false);
+});
+
 test("keeps a slip-supported recipient candidate visible when crop and page OCR agree despite a weaker retry", () => {
   const name = "น.ส. จิณห์นิภา ประสาทเขตรการ";
   const line = { id: "recipient", text: name, confidence: 94, bounds: { x: 382, y: 558, width: 288, height: 18 } };

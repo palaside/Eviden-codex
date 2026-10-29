@@ -83,6 +83,9 @@ export async function POST(request: Request) {
       return NextResponse.json({
         success: false,
         message: mcpError || `FourCorners MCP ตอบกลับ ${response?.status ?? "ไม่มีสถานะ"} โดยไม่มีผลลัพธ์ที่อ่านได้`,
+        provider: "FourCorners T-LEX",
+        provider_status: response?.status ?? null,
+        quota_exceeded: quotaExhausted,
         retryable: !quotaExhausted,
       }, { status: quotaExhausted ? 429 : 502, headers: { "Cache-Control": "no-store" } });
     }

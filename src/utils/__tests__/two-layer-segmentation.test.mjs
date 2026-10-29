@@ -29,7 +29,12 @@ test("does not merge distant OCR lines and clips padded boxes to image bounds", 
 });
 
 test("returns empty layers when OCR found no lines", () => {
-  assert.deepEqual(segmentOcrTextLines([], { width: 10, height: 10 }), { layer1: [], layer2: [] });
+  assert.deepEqual(segmentOcrTextLines([], { width: 10, height: 10 }), {
+    schemaVersion: "digital-evidence.two-layer.v2",
+    layer1: [],
+    layer2: [],
+    searchableTextOverlay: [],
+  });
 });
 
 test("uses Tesseract word boxes for Layer 2 while keeping them linked to the message candidate", () => {

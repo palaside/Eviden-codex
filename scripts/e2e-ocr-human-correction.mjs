@@ -43,8 +43,9 @@ try {
   await page.getByRole("button", { name: /ตารางสรุปหลักฐาน/ }).click();
   const receiver = page.getByLabel("ชื่อผู้รับรายการ 1");
   await receiver.fill(correctedRecipient);
-  await page.getByText("แก้ชื่อจากข้อเสนอแล้ว · ผล OCR เดิมยังขัดแย้ง · รอตรวจยืนยัน").waitFor();
-  step("user-correction-recorded-separately", { ok: true, reviewStateVisible: true, conflictPreserved: true });
+  const afterEditValue = await receiver.inputValue();
+  await page.getByText("กรอก/แก้ไขแล้ว · รอตรวจ", { exact: true }).waitFor();
+  step("user-correction-recorded-separately", { ok: true, reviewStateVisible: true, afterEditValue, ocrConflictCoverage: "case3-review-state" });
 
   await page.getByRole("button", { name: "ยืนยันรายการ" }).click();
   await page.getByText("ผู้ใช้ยืนยัน").last().waitFor();
@@ -53,10 +54,13 @@ try {
   await page.reload({ waitUntil: "networkidle" });
   await page.getByText("ยืนยัน 1 / พบ 1").waitFor();
   const after = await page.locator("body").innerText();
-  assert.match(after, /ผู้ใช้แก้ชื่อและยืนยันแล้ว/u);
-  assert.match(after, /ผล OCR เดิมยังขัดแย้ง/u);
-  assert.doesNotMatch(after, /แก้ชื่อจากข้อเสนอแล้ว · ผล OCR เดิมยังขัดแย้ง · รอตรวจยืนยัน/u);
-  step("reload-preserves-confirmation-and-provenance", { ok: true, confirmationVisible: true, conflictProvenanceVisible: true });
+  await page.getByRole("button", { name: /ตารางสรุปหลักฐาน/ }).click();
+  const afterReloadValue = await page.getByLabel("ชื่อผู้รับรายการ 1").inputValue();
+  step("persisted-value-observed", { afterReloadValue });
+  assert.match(after, /ผู้ใช้แก้\/กรอกชื่อและยืนยันแล้ว/u);
+  assert.equal(afterReloadValue, correctedRecipient);
+  assert.doesNotMatch(after, /กรอก\/แก้ไขแล้ว · รอตรวจ/u);
+  step("reload-preserves-confirmation-and-correction", { ok: true, confirmationVisible: true, correctedValueVisible: true });
   await page.screenshot({ path: path.join(outDir, "ttb-26400-human-correction.png"), fullPage: true });
   report.passed = true;
 } catch (error) {

@@ -84,6 +84,12 @@ test("stitches a confirmed capture overlap once and keeps original-source coordi
     assert.equal(stream.sourceSegments[1].sourceOffsetY, stream.overlapJoins[0].overlapPixels);
     assert.equal(stream.sourceSegments[1].streamStartY, previous.height);
     assert.equal(stream.canvas.data[previous.height * 807 * 4], next.data[stream.sourceSegments[1].sourceOffsetY * 807 * 4]);
+    assert.equal(stream.stitchAudit.schemaVersion, "digital-evidence.stitch-audit.v1");
+    assert.equal(stream.stitchAudit.scaleLocked, true);
+    assert.equal(stream.stitchAudit.originalSha256Preserved, true);
+    assert.equal(stream.stitchAudit.sourceToStream.length, 2);
+    assert.equal(stream.stitchAudit.overlapEvidence.length, 1);
+    assert.equal(stream.stitchAudit.overlapEvidence[0].accepted, true);
   } finally {
     globalThis.document = originalDocument;
     globalThis.createImageBitmap = originalCreateImageBitmap;
@@ -119,6 +125,7 @@ test("records the brightness offset used only for matching and stitches unmodifi
       stream.canvas.data.slice(firstRetainedPixel, firstRetainedPixel + 4),
       next.data.slice(retainedSourceOffset * width * 4, retainedSourceOffset * width * 4 + 4),
     );
+    assert.equal(stream.stitchAudit.overlapEvidence[0].appliedBrightnessOffset, -18);
   } finally {
     globalThis.document = originalDocument;
     globalThis.createImageBitmap = originalCreateImageBitmap;

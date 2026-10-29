@@ -21,6 +21,41 @@ export function selectRecipientRetryResult(originalName, originalConfidence, ret
     : { name: original, confidence: originalConfidence, conflict: true };
 }
 
+export function selectRecipientConsensus(originalName, originalConfidence, candidates = []) {
+  const entries = [
+    { name: typeof originalName === "string" ? originalName.trim() : "", confidence: originalConfidence },
+    ...candidates.map((candidate) => ({
+      name: typeof candidate?.name === "string" ? candidate.name.trim() : "",
+      confidence: candidate?.confidence,
+    })),
+  ].filter((entry) => entry.name);
+  if (entries.length === 0) return { name: null, confidence: 0, conflict: false };
+
+  const groups = new Map();
+  for (const entry of entries) {
+    const key = entry.name.replace(/\s+/gu, " ");
+    const group = groups.get(key) || [];
+    group.push(entry);
+    groups.set(key, group);
+  }
+  const consensus = [...groups.entries()]
+    .sort((left, right) => {
+      const countDelta = right[1].length - left[1].length;
+      if (countDelta !== 0) return countDelta;
+      return Math.max(...right[1].map((entry) => Number.isFinite(entry.confidence) ? entry.confidence : 0))
+        - Math.max(...left[1].map((entry) => Number.isFinite(entry.confidence) ? entry.confidence : 0));
+    })[0][1];
+  const best = [...consensus].sort((left, right) =>
+    (Number.isFinite(right.confidence) ? right.confidence : 0)
+    - (Number.isFinite(left.confidence) ? left.confidence : 0),
+  )[0];
+  const conflict = groups.size > 1;
+  if (consensus.length >= 2) {
+    return { name: best.name, confidence: best.confidence, conflict };
+  }
+  return selectRecipientRetryResult(originalName, originalConfidence, best.name, best.confidence);
+}
+
 export function formatOcrRetryDiagnostic({ scope, trigger, accepted, originalConfidence, enhancedConfidence }) {
   const result = accepted ? "เลือกผล OCR หลังปรับภาพ" : "คงผล OCR ต้นฉบับ";
   const reason = trigger === "missing fields" ? "พบช่องสำคัญขาด" : "ความเชื่อมั่นต่ำหรือไม่พบบรรทัด";

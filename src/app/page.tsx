@@ -778,7 +778,7 @@ export default function MasterEvidenceWorkspace() {
           added = entry.data ? 0 : 1;
           return {
             ...entry, status: "done" as const, error: undefined, meta: entry.meta || result.metadata,
-            data: entry.data ? mergeAiSlipProposal(entry.data, proposal.data) as SlipExtraction : proposal.data,
+            data: entry.data ? mergeAiSlipProposal(entry.data, proposal.data, { replaceUnreviewedConflicts: engine === "yolo" }) as SlipExtraction : proposal.data,
             sourceBounds: proposal.bounds, cropDataUrl: proposal.cropDataUrl, isConfirmed: false,
             aiProposedFields: entry.data
               ? [...new Set([...(entry.aiProposedFields || []), ...getAiFilledFields(entry.data, proposal.data)])]
@@ -792,7 +792,7 @@ export default function MasterEvidenceWorkspace() {
             const matchIndex = records.findIndex((record) => record.id === match.id);
             let mergedData = clearUnreproducedAiNames(
               records[matchIndex],
-              mergeAiSlipProposal(records[matchIndex].data, proposal.data),
+              mergeAiSlipProposal(records[matchIndex].data, proposal.data, { replaceUnreviewedConflicts: engine === "yolo" }),
             );
             // Preserve a non-empty OCR value at the UI merge boundary. A
             // legacy candidate may contain an empty string that otherwise
@@ -1445,11 +1445,14 @@ export default function MasterEvidenceWorkspace() {
         };
       };
       const pageLayers: ChatEvidenceLayerPage = {
+        schemaVersion: "digital-evidence.two-layer.v2",
         pageNumber: job.slice.streamPageNumber || job.slice.sliceIndex,
         ocrDiagnosticTrace: layers.ocrDiagnosticTrace,
         qrScanDiagnostic: qrScanDiagnosticsByPage.get(`${job.itemId}:${job.sliceOffset}`),
         layer1: layers.layer1.map((object) => ({ ...object, ...mapBounds(object.bounds) }) as ChatEvidenceLayerPage["layer1"][number]),
         layer2: layers.layer2.map((line) => ({ ...line, ...mapBounds(line.bounds) })),
+        searchableTextOverlay: layers.searchableTextOverlay?.map((line) => ({ ...line, ...mapBounds(line.bounds), searchable: true as const })),
+        stitchAudit: stitchedStreams.find((stream) => stream.sourceSegments.some((segment) => segment.sourceItemId === job.itemId))?.stitchAudit,
         warnings: [
           ...layers.warnings,
           `Semantic segmentation แบบ heuristic; grayscale mask ${layers.maskCoverage === null ? "ไม่มี" : `${(layers.maskCoverage * 100).toFixed(1)}%`} · HSV/LAB color mask ${layers.colorMaskCoverage === null ? "ไม่มี" : `${(layers.colorMaskCoverage * 100).toFixed(1)}%`}. ผลทุกกรอบเป็น candidate รอตรวจ ไม่ใช่การยืนยันชนิดวัตถุ`,
@@ -3636,6 +3639,11 @@ export default function MasterEvidenceWorkspace() {
                                   ชื่อจาก OCR ในกรอบสลิปและทั้งหน้าตรงกัน · รอบอ่านซ้ำต่างกัน · รอตรวจจากภาพ
                                 </div>
                               )}
+                              {record.ocrRecipientVariants && record.ocrRecipientVariants.length > 1 && (
+                                <div className="mt-1 rounded border border-cyan-300/20 bg-cyan-300/5 px-2 py-1 text-[9px] text-cyan-100">
+                                  <span className="font-semibold">ผล OCR ทุก variant:</span> {record.ocrRecipientVariants.join(" · ")} · ไม่เลือกแทนผู้ใช้
+                                </div>
+                              )}
                               {record.corroboratedRecipientName && (
                                 <div className="mt-1 flex flex-wrap items-center justify-between gap-2 rounded border border-amber-300/20 bg-amber-300/5 px-2 py-1.5 text-[10px]">
                                   <span className="min-w-0 text-amber-100">
@@ -3695,6 +3703,11 @@ export default function MasterEvidenceWorkspace() {
                         {record.ocrProposedRecipientName && (
                           <div className="mt-1 text-[10px] text-amber-100">
                             OCR เสนอ: <strong>{record.ocrProposedRecipientName}</strong> · รอตรวจจากภาพ
+                          </div>
+                        )}
+                        {record.ocrRecipientVariants && record.ocrRecipientVariants.length > 1 && (
+                          <div className="mt-1 rounded border border-cyan-300/20 bg-cyan-300/5 px-2 py-1 text-[9px] text-cyan-100">
+                            <span className="font-semibold">ผล OCR ทุก variant:</span> {record.ocrRecipientVariants.join(" · ")} · ไม่เลือกแทนผู้ใช้
                           </div>
                         )}
                         {record.suggestedRecipientName && (
@@ -3979,6 +3992,45 @@ export default function MasterEvidenceWorkspace() {
                               <div>QR {pageLayers.ocrDiagnosticTrace.qrBounds.length} · วัตถุ {pageLayers.ocrDiagnosticTrace.objectBounds.length} · attempts {pageLayers.ocrDiagnosticTrace.attempts.length} · regions {pageLayers.ocrDiagnosticTrace.regions.length}</div>
                               {pageLayers.qrScanDiagnostic && (
                                 <div data-testid="qr-scan-pixel-diagnostic">QR pixels {pageLayers.qrScanDiagnostic.inputWidth}×{pageLayers.qrScanDiagnostic.inputHeight} · fingerprint {pageLayers.qrScanDiagnostic.pixelFingerprint} · production scale {pageLayers.qrScanDiagnostic.productionUpscale} · enhancement {pageLayers.qrScanDiagnostic.enhancement?.attempted ? `${pageLayers.qrScanDiagnostic.enhancement.decoded ? "decoded" : "miss"} (${pageLayers.qrScanDiagnostic.enhancement.stages.join(" → ")})` : "not attempted"} · {pageLayers.qrScanDiagnostic.scans.map((scan) => `${scan.decoder}${scan.region ? ` tile(${scan.region.x},${scan.region.y},${scan.region.width}×${scan.region.height})@` : ""} ${scan.scale}x:${scan.decoded ? "decoded" : "miss"}`).join(", ")}</div>
+                              )}
+                              {pageLayers.stitchAudit && (
+                                <details className="mt-1 rounded border border-violet-300/20 bg-black/20 p-1" open>
+                                  <summary className="cursor-pointer text-violet-200">Stitch audit · source {pageLayers.stitchAudit.sourceToStream.length} รายการ · overlap {pageLayers.stitchAudit.overlapEvidence.length} จุด</summary>
+                                  <div>schema {pageLayers.stitchAudit.schemaVersion} · scale locked · SHA-256 ต้นฉบับ preserved</div>
+                                  {pageLayers.stitchAudit.sourceToStream.map((source) => (
+                                    <div key={`${source.sourceItemId}-${source.streamStartY}`} className="font-mono text-violet-100">
+                                      {source.sourceFileName} · SHA-256 {source.sourceSha256.slice(0, 12)}… · stream Y {source.streamStartY}–{source.streamEndY} · trim top {source.sourceTrim?.top ?? 0} bottom {source.sourceTrim?.bottom ?? 0}
+                                    </div>
+                                  ))}
+                                  {pageLayers.stitchAudit.overlapEvidence.map((join, index) => (
+                                    <div key={`${join.previousFileName}-${join.nextFileName}-${index}`} className="text-violet-100">
+                                      {join.previousFileName} → {join.nextFileName} · overlap {join.overlapPixels}px · similarity {Math.round(join.pixelSimilarity * 100)}% · {join.accepted ? "accepted" : "rejected"}
+                                    </div>
+                                  ))}
+                                </details>
+                              )}
+                              {pageLayers.searchableTextOverlay && (
+                                <details className="mt-1 rounded border border-emerald-300/20 bg-black/20 p-1" open>
+                                  <summary className="cursor-pointer text-emerald-200">Searchable text overlay · {pageLayers.searchableTextOverlay.length} boxes</summary>
+                                  <div data-testid="searchable-text-overlay" className="sr-only" aria-label="Searchable OCR text overlay">
+                                    {pageLayers.searchableTextOverlay.map((item) => item.text).join(" ")}
+                                  </div>
+                                  {pageLayers.searchableTextOverlay.map((item) => (
+                                    <div key={item.id} className="font-mono text-emerald-100">
+                                      {item.text} · ({Math.round(item.bounds.x)},{Math.round(item.bounds.y)} {Math.round(item.bounds.width)}×{Math.round(item.bounds.height)}) · {Math.round(item.confidence * 100)}% · group {item.groupId}
+                                    </div>
+                                  ))}
+                                </details>
+                              )}
+                              {pageLayers.ocrDiagnosticTrace?.imageArtifacts && (
+                                <details className="mt-1 rounded border border-fuchsia-300/20 bg-black/20 p-1" open>
+                                  <summary className="cursor-pointer text-fuchsia-200">Enhancement artifacts · {pageLayers.ocrDiagnosticTrace.imageArtifacts.length} ภาพ</summary>
+                                  {pageLayers.ocrDiagnosticTrace.imageArtifacts.map((artifact) => (
+                                    <div key={artifact.id} className="font-mono text-fuchsia-100">
+                                      {artifact.variant} · {artifact.width}×{artifact.height} · SHA-256 {artifact.sha256.slice(0, 16)}… · {artifact.stages.join(" → ")}
+                                    </div>
+                                  ))}
+                                </details>
                               )}
                               {pageLayers.ocrDiagnosticTrace.contourAudit && (
                                 <details className="mt-1 rounded border border-amber-300/20 bg-black/20 p-1" open>

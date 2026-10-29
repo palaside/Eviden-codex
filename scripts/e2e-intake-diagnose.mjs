@@ -5,10 +5,13 @@ import path from "node:path";
 const root = process.cwd();
 const baseUrl = process.env.E2E_BASE_URL || "http://127.0.0.1:3450/";
 const outDir = path.resolve(root, process.env.E2E_OUT_DIR || path.join("For Test Results", "intake-diagnose"));
-const fixture = path.resolve(root, "For Test", "แชทที่ 1", "V1- (117).jpg");
+const fixture = path.resolve(root, process.env.E2E_FIXTURE || path.join("For Test", "แชทที่ 1", "V1- (117).jpg"));
 await fs.mkdir(outDir, { recursive: true });
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({
+  headless: true,
+  ...(process.env.E2E_EXECUTABLE_PATH ? { executablePath: process.env.E2E_EXECUTABLE_PATH } : {}),
+});
 const page = await browser.newPage({ viewport: { width: 1662, height: 1548 } });
 const report = { baseUrl, fixture, events: [], consoleErrors: [], pageErrors: [], bodyAfterInput: "", inputFileCount: null };
 page.on("console", (message) => report.events.push({ type: `console:${message.type()}`, text: message.text() }));

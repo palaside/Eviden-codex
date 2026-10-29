@@ -1,5 +1,23 @@
 import type { SlipExtraction } from "@/schemas/slip.schema";
 import type { SlipOcrDiagnosticTrace } from "@/types/slip-ocr-trace";
+import type { ChatStreamSourceSegment } from "@/utils/stitch-chat-images";
+
+export type TwoLayerEvidenceSchemaVersion = "digital-evidence.two-layer.v2";
+
+export interface StitchAudit {
+  schemaVersion: "digital-evidence.stitch-audit.v1";
+  sourceToStream: ChatStreamSourceSegment[];
+  overlapEvidence: Array<{
+    previousFileName: string;
+    nextFileName: string;
+    overlapPixels: number;
+    pixelSimilarity: number;
+    appliedBrightnessOffset: number;
+    accepted: boolean;
+  }>;
+  scaleLocked: true;
+  originalSha256Preserved: true;
+}
 
 export interface EmbeddedSlipRecord {
   id: string;
@@ -38,6 +56,7 @@ export interface EmbeddedSlipRecord {
 }
 
 export interface ChatEvidenceLayerPage {
+  schemaVersion?: TwoLayerEvidenceSchemaVersion;
   pageNumber: number;
   ocrDiagnosticTrace?: SlipOcrDiagnosticTrace;
   qrScanDiagnostic?: {
@@ -91,5 +110,14 @@ export interface ChatEvidenceLayerPage {
     streamBounds: { x: number; y: number; width: number; height: number };
     sourceReferences: Array<{ sourceItemId: string; fileName: string; sha256: string; captureTime?: string | null; bounds: { x: number; y: number; width: number; height: number } }>;
   }>;
+  searchableTextOverlay?: Array<{
+    id: string;
+    text: string;
+    bounds: { x: number; y: number; width: number; height: number };
+    confidence: number;
+    groupId: string;
+    searchable: true;
+  }>;
+  stitchAudit?: StitchAudit;
   warnings: string[];
 }

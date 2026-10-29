@@ -62,7 +62,15 @@
     ".next-qr-case2/types/**/*.ts",
     ".next-qr-case2/dev/types/**/*.ts",
     "build-output-enterprise/types/**/*.ts",
-    "build-output-enterprise/dev/types/**/*.ts"
+    "build-output-enterprise/dev/types/**/*.ts",
+    "build-output-e2e-20261028-ocrfix3/types/**/*.ts",
+    "build-output-e2e-20261028-ocrfix3/dev/types/**/*.ts",
+    "build-output-e2e-20261029-final/types/**/*.ts",
+    "build-output-e2e-20261029-final/dev/types/**/*.ts",
+    "build-output-ocrfix4/types/**/*.ts",
+    "build-output-ocrfix4/dev/types/**/*.ts",
+    "build-output-ocrfix5b/types/**/*.ts",
+    "build-output-ocrfix5b/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

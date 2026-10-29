@@ -35,6 +35,20 @@ export interface StitchedChatStream {
     pixelSimilarity: number;
     appliedBrightnessOffset: number;
   }>;
+  stitchAudit: {
+    schemaVersion: "digital-evidence.stitch-audit.v1";
+    sourceToStream: ChatStreamSourceSegment[];
+    overlapEvidence: Array<{
+      previousFileName: string;
+      nextFileName: string;
+      overlapPixels: number;
+      pixelSimilarity: number;
+      appliedBrightnessOffset: number;
+      accepted: boolean;
+    }>;
+    scaleLocked: true;
+    originalSha256Preserved: true;
+  };
   warnings: string[];
 }
 
@@ -116,6 +130,37 @@ export async function stitchChatImages(inputs: ChatStreamInput[]): Promise<Stitc
           appliedBrightnessOffset: overlap.appliedBrightnessOffset,
         },
       ],
+        stitchAudit: {
+          schemaVersion: "digital-evidence.stitch-audit.v1",
+          sourceToStream: [
+            ...previousStream.sourceSegments,
+            {
+              sourceItemId: entry.input.id,
+              sourceFileName: entry.input.file.name,
+              sourceSha256: entry.input.sha256,
+              captureTime: entry.input.captureTime || null,
+              eventTime: entry.input.eventTime || null,
+              streamStartY: nextVisibleTop,
+              streamEndY: joined.height,
+              sourceOffsetY: entry.trim.top + overlap.overlapPixels,
+              sourceScale: entry.sourceScale,
+              sourceTrim: { ...entry.trim },
+            },
+          ].filter((segment) => segment.streamEndY > segment.streamStartY),
+          overlapEvidence: [
+            ...previousStream.stitchAudit.overlapEvidence,
+            {
+              previousFileName: previousStream.sourceSegments.at(-1)?.sourceFileName || "",
+              nextFileName: entry.input.file.name,
+              overlapPixels: overlap.overlapPixels,
+              pixelSimilarity: overlap.pixelSimilarity,
+              appliedBrightnessOffset: overlap.appliedBrightnessOffset,
+              accepted: true,
+            },
+          ],
+          scaleLocked: true,
+          originalSha256Preserved: true,
+        },
       warnings: [...previousStream.warnings, ...entry.trim.warnings],
     };
   }
@@ -187,6 +232,24 @@ function startStream(entry: Awaited<ReturnType<typeof normalizeInput>>, warnings
       sourceTrim: { ...entry.trim },
     }],
     overlapJoins: [],
+    stitchAudit: {
+      schemaVersion: "digital-evidence.stitch-audit.v1",
+      sourceToStream: [{
+        sourceItemId: entry.input.id,
+        sourceFileName: entry.input.file.name,
+        sourceSha256: entry.input.sha256,
+        captureTime: entry.input.captureTime || null,
+        eventTime: entry.input.eventTime || null,
+        streamStartY: 0,
+        streamEndY: entry.canvas.height,
+        sourceOffsetY: entry.trim.top,
+        sourceScale: entry.sourceScale,
+        sourceTrim: { ...entry.trim },
+      }],
+      overlapEvidence: [],
+      scaleLocked: true,
+      originalSha256Preserved: true,
+    },
     warnings: [...warnings, ...entry.trim.warnings],
   };
 }

@@ -1,5 +1,5 @@
 export type SlipOcrTraceScope = "qr_crop" | "full_page" | "recipient_retry";
-export type SlipOcrTraceTrigger = "initial" | "low_confidence" | "missing_fields" | "recipient_missing" | "sender_missing";
+export type SlipOcrTraceTrigger = "initial" | "low_confidence" | "missing_fields" | "recipient_missing" | "sender_missing" | "visual_region_fallback";
 
 export interface SlipOcrTraceBounds { x: number; y: number; width: number; height: number }
 
@@ -8,6 +8,19 @@ export interface SlipOcrTraceLine {
   text: string;
   confidence: number;
   bounds: SlipOcrTraceBounds;
+}
+
+export interface SlipImageArtifact {
+  id: string;
+  kind: "source" | "ocr_variant" | "segmentation_mask";
+  variant: string;
+  width: number;
+  height: number;
+  scale: number;
+  sha256: string;
+  sourceBounds?: SlipOcrTraceBounds;
+  stages: string[];
+  dataUrl?: string;
 }
 
 export interface SlipOcrAttemptTrace {
@@ -27,6 +40,7 @@ export interface SlipOcrRegionTrace {
   senderName: string | null;
   receiverName: string | null;
   reference: string | null;
+  visualCropEvidence?: boolean;
   acceptedByCandidatePolicy: boolean;
   reason: string;
 }
@@ -58,6 +72,7 @@ export interface SlipOcrContourAudit {
 }
 
 export interface SlipOcrDiagnosticTrace {
+  schemaVersion?: "digital-evidence.slip-ocr-trace.v2";
   sourceDimensions: { width: number; height: number };
   objectBounds: SlipOcrTraceBounds[];
   qrBounds: SlipOcrTraceBounds[];
@@ -66,4 +81,5 @@ export interface SlipOcrDiagnosticTrace {
   attempts: SlipOcrAttemptTrace[];
   regions: SlipOcrRegionTrace[];
   parserRejectionReasons: string[];
+  imageArtifacts?: SlipImageArtifact[];
 }

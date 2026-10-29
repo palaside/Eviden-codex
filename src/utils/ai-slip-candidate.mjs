@@ -28,12 +28,20 @@ export function findMatchingSlipRecord(records, bounds, proposedData = null) {
   }) || null;
 }
 
-export function mergeAiSlipProposal(local, ai) {
+export function mergeAiSlipProposal(local, ai, options = {}) {
   const conflicts = [];
+  const replaceUnreviewedConflicts = options.replaceUnreviewedConflicts === true;
   const hasValue = (value) => value != null && (typeof value !== "string" || value.trim() !== "");
   const choose = (path, current, proposed) => {
     if (hasValue(current) && hasValue(proposed) && current !== proposed) conflicts.push(path);
-    return hasValue(current) ? current : proposed;
+    const reviewedField = path === "sender.name" ? "sender_name"
+      : path === "receiver.name" ? "receiver_name" : null;
+    const canReplace = replaceUnreviewedConflicts
+      && hasValue(current)
+      && hasValue(proposed)
+      && current !== proposed
+      && (!reviewedField || !local.reviewed_fields?.includes(reviewedField));
+    return canReplace ? proposed : (hasValue(current) ? current : proposed);
   };
   const transaction = { ...local.transaction };
   for (const key of ["date", "time", "amount", "fee", "reference_no", "transaction_id", "note"]) {
@@ -53,7 +61,17 @@ export function mergeAiSlipProposal(local, ai) {
     sender_account: "sender.account_no", receiver_account: "receiver.account_no",
   })) {
     const [group, field] = value.includes(".") ? value.split(".") : ["transaction", value];
-    if (!hasValue(local[group][field]) && hasValue(ai[group][field])) confidence[confidenceKey] = ai.confidence[confidenceKey];
+    const proposedPath = value;
+    const currentValue = local[group][field];
+    const proposedValue = ai[group][field];
+    const reviewedField = proposedPath === "sender.name" ? "sender_name"
+      : proposedPath === "receiver.name" ? "receiver_name" : null;
+    const canReplace = replaceUnreviewedConflicts
+      && hasValue(currentValue)
+      && hasValue(proposedValue)
+      && currentValue !== proposedValue
+      && (!reviewedField || !local.reviewed_fields?.includes(reviewedField));
+    if ((!hasValue(currentValue) && hasValue(proposedValue)) || canReplace) confidence[confidenceKey] = ai.confidence[confidenceKey];
   }
   return {
     ...local,

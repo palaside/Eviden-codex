@@ -10,11 +10,12 @@ import { createFieldRetryCanvas } from "@/utils/ocr-retry-preprocessing.mjs";
 import { findChatEventTimestamp } from "@/utils/chat-capture-metadata.mjs";
 import { shouldBuildChatEvidenceLayers } from "@/utils/ocr-analysis-policy.mjs";
 import { reconcilePageOcrNamesIntoQrCandidates } from "@/utils/reconcile-slip-ocr-candidates.mjs";
+import { createCanvasEvidenceArtifact } from "@/utils/evidence-image-artifacts.mjs";
 import { buildOcrAttemptTrace, explainSlipOcrRegionRejection } from "@/utils/slip-ocr-trace.mjs";
 import type { SlipOcrAttemptTrace, SlipOcrDiagnosticTrace, SlipOcrRegionTrace } from "@/types/slip-ocr-trace";
 import {
   evaluateEnhancedOcrRetry,
-  selectRecipientRetryResult,
+  selectRecipientConsensus,
   shouldRetryRecipientName,
   shouldRetryOcrForMissingSlipFields,
   shouldRetryOcrWithEnhancement,
@@ -194,6 +195,23 @@ export async function extractSlipCandidatesWithLocalOcr(
     const worker = await getLocalOcrWorker(workerSlot);
     let qrOcrCandidates: LocalSlipCandidate[] = [];
     const diagnosticAttempts: SlipOcrAttemptTrace[] = [];
+    const artifactInputs: Array<{
+      id: string;
+      kind: "source" | "ocr_variant" | "segmentation_mask";
+      variant: string;
+      canvas: HTMLCanvasElement;
+      scale: number;
+      sourceBounds?: PixelBounds;
+      stages: string[];
+    }> = [{
+      id: "source-1",
+      kind: "source",
+      variant: "source-canvas",
+      canvas,
+      scale: 1,
+      stages: ["pixels", "source-preserved"],
+    }];
+    const registerArtifact = (input: typeof artifactInputs[number]) => artifactInputs.push(input);
     let fieldRetryAttempted = false;
     let contourCandidates: Awaited<ReturnType<typeof detectChatVisualRegions>>["regions"] = [];
     if (qrCandidates.length) {
@@ -222,6 +240,7 @@ export async function extractSlipCandidatesWithLocalOcr(
           - Math.max(0, objectBounds.y - paddingY),
       } : fallbackBounds;
       const qrCrop = makeCanvasCrop(canvas, cropBounds);
+      registerArtifact({ id: `qr-${diagnosticAttempts.length + 1}-original`, kind: "ocr_variant", variant: "qr-original", canvas: qrCrop, scale: 1, sourceBounds: cropBounds, stages: ["crop", "recognize"] });
       const { data: originalQrData } = await worker.recognize(qrCrop, {}, { blocks: true });
       let lines = getOcrLines(originalQrData);
       diagnosticAttempts.push(buildOcrAttemptTrace({
@@ -249,6 +268,7 @@ export async function extractSlipCandidatesWithLocalOcr(
               colorSeparation: createColorSeparatedOcrCanvas,
             })).canvas
           : retry.canvas;
+        registerArtifact({ id: `qr-${diagnosticAttempts.length + 1}-enhanced`, kind: "ocr_variant", variant: retryQrForFields ? "qr-field-retry" : "qr-enhanced", canvas: retryCanvas, scale: retry.scale, sourceBounds: cropBounds, stages: ["gamma_normalization", "denoise", "clahe_contrast", "unsharp_mask", ...(retryQrForFields ? ["morphological_mask", "color_segmentation"] : []), "recognize"] });
         const { data: enhancedQrData } = await worker.recognize(retryCanvas, {}, { blocks: true });
         diagnosticAttempts.push(buildOcrAttemptTrace({
           id: `qr-${diagnosticAttempts.length + 1}-retry`, scope: "qr_crop",
@@ -311,6 +331,7 @@ export async function extractSlipCandidatesWithLocalOcr(
             morphology: createMorphologicalSlipOcrCanvas,
             colorSeparation: createColorSeparatedOcrCanvas,
           })).canvas;
+          registerArtifact({ id: `sender-${diagnosticAttempts.length + 1}`, kind: "ocr_variant", variant: "sender-field-retry", canvas: senderRetryCanvas, scale: senderRetry.scale, sourceBounds: { x: cropBounds.x + region.bounds.x0, y: cropBounds.y + region.bounds.y0, width: region.bounds.x1 - region.bounds.x0, height: region.bounds.y1 - region.bounds.y0 }, stages: ["field_crop", "morphological_mask", "color_segmentation", "recognize"] });
           const { data: senderRetryData } = await worker.recognize(senderRetryCanvas, {}, { blocks: true });
           const senderRetryLines = getOcrLines(senderRetryData);
           diagnosticAttempts.push(buildOcrAttemptTrace({
@@ -330,6 +351,11 @@ export async function extractSlipCandidatesWithLocalOcr(
           }
         }
         if (shouldRetryRecipientName(region.receiverName, region.receiverNameConfidence)) {
+          const originalRecipient = {
+            name: region.receiverName,
+            confidence: region.receiverNameConfidence,
+          };
+          const recipientRetryCandidates: Array<{ name: string | null; confidence: number }> = [];
           const retryBounds = getRecipientRetryCropBounds(region);
           const x0 = Math.max(0, Math.floor(retryBounds.x));
           const y0 = Math.max(0, Math.floor(retryBounds.y));
@@ -345,6 +371,7 @@ export async function extractSlipCandidatesWithLocalOcr(
             morphology: createMorphologicalSlipOcrCanvas,
             colorSeparation: createColorSeparatedOcrCanvas,
           })).canvas;
+          registerArtifact({ id: `recipient-${diagnosticAttempts.length + 1}`, kind: "ocr_variant", variant: "recipient-field-retry", canvas: retryCanvas, scale: retry.scale, sourceBounds: { x: cropBounds.x + x0, y: cropBounds.y + y0, width: x1 - x0, height: y1 - y0 }, stages: ["field_crop", "gamma_normalization", "denoise", "clahe_contrast", "unsharp_mask", "morphological_mask", "color_segmentation", "recognize"] });
           const { data: retryData } = await worker.recognize(retryCanvas, {}, { blocks: true });
           diagnosticAttempts.push(buildOcrAttemptTrace({
             id: `recipient-${diagnosticAttempts.length + 1}`, scope: "recipient_retry", trigger: "recipient_missing",
@@ -360,20 +387,34 @@ export async function extractSlipCandidatesWithLocalOcr(
             })),
             retry.scale,
           );
-          const selectedRecipient = selectRecipientRetryResult(
-            region.receiverName,
-            region.receiverNameConfidence,
-            retryRecipient.name,
-            retryRecipient.confidence,
+          recipientRetryCandidates.push(retryRecipient);
+
+          // A bounded single-line pass is useful for Thai glyphs that are
+          // merged when the whole field crop is recognized as a block. It is
+          // still evidence only; consensus below must accept it before it can
+          // replace the original value.
+          const plainLineData = await recognizeSingleLine(worker, retry.canvas);
+          const plainLine = findRecipientName(
+            getOcrLines(plainLineData.data).map((line) => ({
+              text: line.text,
+              confidence: line.confidence,
+              bbox: line.bbox,
+            })),
+            retry.scale,
           );
-          region.receiverNameRetryConflict = selectedRecipient.conflict;
-          region.receiverName = selectedRecipient.name;
-          region.receiverNameConfidence = selectedRecipient.confidence;
+          diagnosticAttempts.push(buildOcrAttemptTrace({
+            id: `recipient-${diagnosticAttempts.length + 1}-single-line`, scope: "recipient_retry", trigger: "recipient_missing",
+            sourceBounds: { x: cropBounds.x + x0, y: cropBounds.y + y0, width: x1 - x0, height: y1 - y0 },
+            inputWidth: retry.canvas.width, inputHeight: retry.canvas.height, scale: retry.scale,
+            meanConfidence: plainLineData.data.confidence, lines: getOcrLines(plainLineData.data),
+          }));
+          recipientRetryCandidates.push(plainLine);
 
           // Run one bounded color-separation variant for low-confidence names.
           // Keep the existing policy as the selector; this adds evidence without
           // turning an ambiguous OCR result into a confirmed value.
           const colorRetryCanvas = await createColorSeparatedOcrCanvas(retry.canvas);
+          registerArtifact({ id: `recipient-${diagnosticAttempts.length + 1}-color`, kind: "segmentation_mask", variant: "recipient-color-separated", canvas: colorRetryCanvas, scale: retry.scale, sourceBounds: { x: cropBounds.x + x0, y: cropBounds.y + y0, width: x1 - x0, height: y1 - y0 }, stages: ["hsv_lab_segmentation", "recognize"] });
           const { data: colorRetryData } = await recognizeSingleLine(worker, colorRetryCanvas);
           const colorRetryLines = getOcrLines(colorRetryData);
           diagnosticAttempts.push(buildOcrAttemptTrace({
@@ -386,15 +427,15 @@ export async function extractSlipCandidatesWithLocalOcr(
             colorRetryLines.map((line) => ({ text: line.text, confidence: line.confidence, bbox: line.bbox })),
             retry.scale,
           );
-          const selectedColorRecipient = selectRecipientRetryResult(
-            region.receiverName,
-            region.receiverNameConfidence,
-            colorRecipient.name,
-            colorRecipient.confidence,
+          recipientRetryCandidates.push(colorRecipient);
+          const selectedRecipient = selectRecipientConsensus(
+            originalRecipient.name,
+            originalRecipient.confidence,
+            recipientRetryCandidates,
           );
-          region.receiverNameRetryConflict = region.receiverNameRetryConflict || selectedColorRecipient.conflict;
-          region.receiverName = selectedColorRecipient.name;
-          region.receiverNameConfidence = selectedColorRecipient.confidence;
+          region.receiverNameRetryConflict = selectedRecipient.conflict;
+          region.receiverName = selectedRecipient.name;
+          region.receiverNameConfidence = selectedRecipient.confidence;
         }
 
         const absoluteBounds = {
@@ -541,10 +582,68 @@ export async function extractSlipCandidatesWithLocalOcr(
         colorMaskCoverage,
       });
     }
-    const detectedSlipRegions = findSlipOcrRegions(
+    let detectedSlipRegions = findSlipOcrRegions(
       lines.map((line) => ({ text: line.text, confidence: line.confidence, bbox: line.bbox })),
       { width: canvas.width, height: canvas.height },
     );
+    if (options.jobKind === "CHAT" && visualCandidates.length) {
+      const visualSlipCandidates = visualCandidates.filter(({ bounds, objectTypeCandidate }) => {
+        const areaRatio = bounds.width * bounds.height / Math.max(1, canvas.width * canvas.height);
+        const verticalAspect = bounds.height / Math.max(1, bounds.width);
+        return areaRatio >= 0.025 && areaRatio <= 0.68 && verticalAspect >= 1.15
+          && !/(?:avatar|icon|audio|video|sticker)/iu.test(objectTypeCandidate || "");
+      });
+      const visualCropRegions = [];
+      for (const [index, visual] of visualSlipCandidates.entries()) {
+        const cropBounds = {
+          x: Math.max(0, Math.floor(visual.bounds.x)),
+          y: Math.max(0, Math.floor(visual.bounds.y)),
+          width: Math.min(canvas.width - Math.max(0, Math.floor(visual.bounds.x)), Math.ceil(visual.bounds.width)),
+          height: Math.min(canvas.height - Math.max(0, Math.floor(visual.bounds.y)), Math.ceil(visual.bounds.height)),
+        };
+        if (cropBounds.width < 32 || cropBounds.height < 48) continue;
+        const crop = makeEnhancedOcrCrop(canvas, cropBounds, 1.5, 2800);
+        const cropCanvas = (await createFieldRetryCanvas(crop.canvas, options.jobKind, {
+          morphology: createMorphologicalSlipOcrCanvas,
+          colorSeparation: createColorSeparatedOcrCanvas,
+        })).canvas;
+        registerArtifact({
+          id: `page-visual-slip-${index + 1}`,
+          kind: "ocr_variant",
+          variant: "visual-slip-crop",
+          canvas: cropCanvas,
+          scale: crop.scale,
+          sourceBounds: cropBounds,
+          stages: ["visual_region_crop", "gamma_normalization", "denoise", "clahe_contrast", "unsharp_mask", "recognize"],
+        });
+        const { data: cropData } = await worker.recognize(cropCanvas, {}, { blocks: true });
+        const cropLines = getOcrLines(cropData).map((line) => ({
+          ...line,
+          bbox: {
+            x0: Math.round(line.bbox.x0 / crop.scale),
+            y0: Math.round(line.bbox.y0 / crop.scale),
+            x1: Math.round(line.bbox.x1 / crop.scale),
+            y1: Math.round(line.bbox.y1 / crop.scale),
+          },
+        }));
+        diagnosticAttempts.push(buildOcrAttemptTrace({
+          id: `visual-slip-${index + 1}`,
+          scope: "full_page",
+          trigger: "visual_region_fallback",
+          sourceBounds: cropBounds,
+          inputWidth: cropCanvas.width,
+          inputHeight: cropCanvas.height,
+          scale: crop.scale,
+          meanConfidence: cropData.confidence,
+          lines: cropLines,
+        }));
+        const parsed = findSlipOcrRegions(cropLines, { width: cropBounds.width, height: cropBounds.height });
+        for (const region of parsed) {
+          visualCropRegions.push(shiftSlipRegionToPage(region, cropBounds.x, cropBounds.y));
+        }
+      }
+      detectedSlipRegions = mergeSlipRegions(detectedSlipRegions, visualCropRegions);
+    }
     const regions = filterTextOnlySlipRegionsForJob(detectedSlipRegions, {
       jobKind: options.jobKind,
       visualCandidates,
@@ -563,6 +662,7 @@ export async function extractSlipCandidatesWithLocalOcr(
           morphology: createMorphologicalSlipOcrCanvas,
           colorSeparation: createColorSeparatedOcrCanvas,
         })).canvas;
+        registerArtifact({ id: `page-sender-${diagnosticAttempts.length + 1}`, kind: "ocr_variant", variant: "page-sender-field-retry", canvas: senderRetryCanvas, scale: senderRetry.scale, sourceBounds: { x: senderRetryBounds.x0, y: senderRetryBounds.y0, width: senderRetryBounds.x1 - senderRetryBounds.x0, height: senderRetryBounds.y1 - senderRetryBounds.y0 }, stages: ["field_crop", "morphological_mask", "color_segmentation", "recognize"] });
         const { data: senderRetryData } = await worker.recognize(senderRetryCanvas, {}, { blocks: true });
         const senderRetryLines = getOcrLines(senderRetryData);
         diagnosticAttempts.push(buildOcrAttemptTrace({
@@ -606,11 +706,17 @@ export async function extractSlipCandidatesWithLocalOcr(
       const height = Math.max(1, y1 - y0);
       const scale = getOcrEnhancementScale(width, height, 3);
       if (scale <= 1) continue;
+      const originalRecipient = {
+        name: region.receiverName,
+        confidence: region.receiverNameConfidence,
+      };
+      const recipientRetryCandidates: Array<{ name: string | null; confidence: number }> = [];
       const retry = makeEnhancedOcrCrop(canvas, { x: x0, y: y0, width, height });
       const retryCanvas = (await createFieldRetryCanvas(retry.canvas, options.jobKind, {
         morphology: createMorphologicalSlipOcrCanvas,
         colorSeparation: createColorSeparatedOcrCanvas,
       })).canvas;
+      registerArtifact({ id: `page-recipient-${diagnosticAttempts.length + 1}`, kind: "ocr_variant", variant: "page-recipient-field-retry", canvas: retryCanvas, scale: retry.scale, sourceBounds: { x: x0, y: y0, width, height }, stages: ["field_crop", "gamma_normalization", "denoise", "clahe_contrast", "unsharp_mask", "morphological_mask", "color_segmentation", "recognize"] });
       const { data: cropData } = await worker.recognize(retryCanvas, {}, { blocks: true });
       const cropLines = cropData.blocks?.flatMap((block) => block.paragraphs.flatMap((paragraph) => paragraph.lines)) ?? [];
       diagnosticAttempts.push(buildOcrAttemptTrace({
@@ -633,6 +739,7 @@ export async function extractSlipCandidatesWithLocalOcr(
           height: Math.min(retryCanvas.height, Math.ceil(line.bbox.y1 + padding)) - Math.max(0, Math.floor(line.bbox.y0 - padding)),
         };
         const lineCanvas = makeCanvasCrop(retryCanvas, lineBounds);
+        registerArtifact({ id: `page-recipient-${diagnosticAttempts.length + 1}-line`, kind: "ocr_variant", variant: "page-recipient-line-retry", canvas: lineCanvas, scale: retry.scale, sourceBounds: { x: x0 + lineBounds.x, y: y0 + lineBounds.y, width: lineBounds.width, height: lineBounds.height }, stages: ["line_crop", "recognize"] });
         const { data: lineData } = await recognizeSingleLine(worker, lineCanvas);
         const lineOcrLines = getOcrLines(lineData);
         diagnosticAttempts.push(buildOcrAttemptTrace({
@@ -656,17 +763,16 @@ export async function extractSlipCandidatesWithLocalOcr(
           } })),
         ], retry.scale);
       }
-      const selectedRecipient = selectRecipientRetryResult(
-        region.receiverName,
-        region.receiverNameConfidence,
-        lineRecipient.name || recipient.name,
-        lineRecipient.name ? lineRecipient.confidence : recipient.confidence,
-      );
-      region.receiverNameRetryConflict = selectedRecipient.conflict;
-      region.receiverName = selectedRecipient.name;
-      region.receiverNameConfidence = selectedRecipient.confidence;
-
+      recipientRetryCandidates.push({
+        name: lineRecipient.name || recipient.name,
+        confidence: lineRecipient.name ? lineRecipient.confidence : recipient.confidence,
+      });
+      /*
+       * The color pass below is another independent OCR observation. It is
+       * added to the consensus before the final field value is selected.
+       */
       const colorRetryCanvas = await createColorSeparatedOcrCanvas(retry.canvas);
+      registerArtifact({ id: `page-recipient-${diagnosticAttempts.length + 1}-color`, kind: "segmentation_mask", variant: "page-recipient-color-separated", canvas: colorRetryCanvas, scale: retry.scale, sourceBounds: { x: x0, y: y0, width, height }, stages: ["hsv_lab_segmentation", "recognize"] });
       const { data: colorRetryData } = await recognizeSingleLine(worker, colorRetryCanvas);
       const colorRetryLines = colorRetryData.blocks?.flatMap((block) => block.paragraphs.flatMap((paragraph) => paragraph.lines)) ?? [];
       diagnosticAttempts.push(buildOcrAttemptTrace({
@@ -678,15 +784,15 @@ export async function extractSlipCandidatesWithLocalOcr(
         colorRetryLines.map((line) => ({ text: line.text, confidence: line.confidence, bbox: line.bbox })),
         retry.scale,
       );
-      const selectedColorRecipient = selectRecipientRetryResult(
-        region.receiverName,
-        region.receiverNameConfidence,
-        colorRecipient.name,
-        colorRecipient.confidence,
+      recipientRetryCandidates.push(colorRecipient);
+      const finalRecipient = selectRecipientConsensus(
+        originalRecipient.name,
+        originalRecipient.confidence,
+        recipientRetryCandidates,
       );
-      region.receiverNameRetryConflict = region.receiverNameRetryConflict || selectedColorRecipient.conflict;
-      region.receiverName = selectedColorRecipient.name;
-      region.receiverNameConfidence = selectedColorRecipient.confidence;
+      region.receiverNameRetryConflict = finalRecipient.conflict;
+      region.receiverName = finalRecipient.name;
+      region.receiverNameConfidence = finalRecipient.confidence;
     }
 
     // Build the trace after all field retries so exported evidence and the UI
@@ -699,11 +805,14 @@ export async function extractSlipCandidatesWithLocalOcr(
         senderName: region.senderName,
         receiverName: region.receiverName,
         reference: region.referenceNo,
+        visualCropEvidence: region.visualCropEvidence,
         acceptedByCandidatePolicy,
         reason: acceptedByCandidatePolicy ? "ผ่าน policy filter สำหรับ candidate OCR" : "parser พบ region แต่ policy filter ไม่ส่งต่อเป็น candidate; policy ปัจจุบันไม่ส่งเหตุผลราย region",
       };
     });
+    const imageArtifacts = await Promise.all(artifactInputs.map((input) => createCanvasEvidenceArtifact(input)));
     const ocrDiagnosticTrace: SlipOcrDiagnosticTrace = {
+      schemaVersion: "digital-evidence.slip-ocr-trace.v2",
       sourceDimensions: { width: canvas.width, height: canvas.height },
       objectBounds: visualCandidates.map(({ bounds }) => ({ ...bounds })),
       qrBounds: qrCandidates.map(({ bounds }) => ({ ...bounds })),
@@ -716,6 +825,7 @@ export async function extractSlipCandidatesWithLocalOcr(
         qrCount: qrCandidates.length,
         regionCount: diagnosticRegions.length,
       }),
+      imageArtifacts,
     };
     const cachedLayers = chatEvidenceLayerCache.get(canvas);
     if (cachedLayers) chatEvidenceLayerCache.set(canvas, { ...cachedLayers, ocrDiagnosticTrace });
@@ -782,4 +892,47 @@ export async function extractSlipCandidatesWithLocalOcr(
     workerPromises[workerIndex] = null;
     throw error;
   }
+}
+
+function shiftSlipRegionToPage(
+  region: ReturnType<typeof findSlipOcrRegions>[number],
+  offsetX: number,
+  offsetY: number,
+): ReturnType<typeof findSlipOcrRegions>[number] {
+  const shiftBounds = (bounds: { x0: number; y0: number; x1: number; y1: number } | null) => bounds
+    ? { x0: bounds.x0 + offsetX, y0: bounds.y0 + offsetY, x1: bounds.x1 + offsetX, y1: bounds.y1 + offsetY }
+    : null;
+  return {
+    ...region,
+    bounds: shiftBounds(region.bounds)!,
+    focusBounds: shiftBounds(region.focusBounds)!,
+    recipientFocusBounds: shiftBounds(region.recipientFocusBounds),
+    ocrLineEvidence: region.ocrLineEvidence.map((line) => ({
+      ...line,
+      bounds: { ...line.bounds, x: line.bounds.x + offsetX, y: line.bounds.y + offsetY },
+    })),
+    visualCropEvidence: true,
+  };
+}
+
+function mergeSlipRegions(
+  base: ReturnType<typeof findSlipOcrRegions>,
+  additions: ReturnType<typeof findSlipOcrRegions>,
+) {
+  const merged = [...base];
+  for (const addition of additions) {
+    const duplicateIndex = merged.findIndex((existing) => {
+      const width = Math.max(0, Math.min(existing.bounds.x1, addition.bounds.x1) - Math.max(existing.bounds.x0, addition.bounds.x0));
+      const height = Math.max(0, Math.min(existing.bounds.y1, addition.bounds.y1) - Math.max(existing.bounds.y0, addition.bounds.y0));
+      const overlap = width * height;
+      const smaller = Math.min(
+        (existing.bounds.x1 - existing.bounds.x0) * (existing.bounds.y1 - existing.bounds.y0),
+        (addition.bounds.x1 - addition.bounds.x0) * (addition.bounds.y1 - addition.bounds.y0),
+      );
+      return smaller > 0 && overlap / smaller >= 0.65;
+    });
+    if (duplicateIndex < 0) merged.push(addition);
+    else if (addition.visualCropEvidence) merged[duplicateIndex] = addition;
+  }
+  return merged;
 }

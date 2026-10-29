@@ -7,6 +7,7 @@ import {
   shouldRetryOcrWithEnhancement,
   shouldRetryRecipientName,
   selectRecipientRetryResult,
+  selectRecipientConsensus,
   shouldUseEnhancedOcrForSlipFields,
   shouldUseEnhancedOcrResult,
 } from "../ocr-enhancement-retry-policy.mjs";
@@ -84,6 +85,15 @@ test("only replaces a conflicting recipient name when focused OCR is materially 
   });
   assert.deepEqual(selectRecipientRetryResult("วิณห์นิภา", 0.92, "วิณห์นิภา", 0.88), {
     name: "วิณห์นิภา", confidence: 0.92, conflict: false,
+  });
+});
+
+test("selects a recipient name repeated by two independent OCR retries even when each retry is less confident", () => {
+  assert.deepEqual(selectRecipientConsensus("วิณห์นิภา ประสาทเขตรการ", 0.92, [
+    { name: "จิณห์นิภา ประสาทเขตรการ", confidence: 0.94 },
+    { name: "จิณห์นิภา ประสาทเขตรการ", confidence: 0.90 },
+  ]), {
+    name: "จิณห์นิภา ประสาทเขตรการ", confidence: 0.94, conflict: true,
   });
 });
 

@@ -7,6 +7,7 @@ const baseUrl = process.env.E2E_BASE_URL || "http://127.0.0.1:3450/";
 const outDir = path.resolve(root, process.env.E2E_OUT_DIR || path.join("For Test Results", "batch-local-e2e"));
 const limit = Number(process.env.E2E_BATCH_LIMIT || 20);
 const requestedRoots = (process.env.E2E_FIXTURE_ROOTS || "For Test\\แชทที่ 1;For Test\\แชทที่ 2;For Test\\แชทที่ 3;For Test\\Done").split(";").filter(Boolean);
+const offset = Math.max(0, Number(process.env.E2E_BATCH_OFFSET || 0));
 const allFiles = [];
 for (const relativeRoot of requestedRoots) {
   const absoluteRoot = path.resolve(root, relativeRoot);
@@ -15,10 +16,14 @@ for (const relativeRoot of requestedRoots) {
     if (/\.(?:jpe?g|png)$/i.test(entry.name)) allFiles.push(path.join(absoluteRoot, entry.name));
   }
 }
-const fixtures = allFiles.slice(0, limit);
+const explicitFixtures = (process.env.E2E_FIXTURE_FILES || "").split(";").map((file) => file.trim()).filter(Boolean).map((file) => path.resolve(root, file));
+const fixtures = explicitFixtures.length > 0 ? explicitFixtures : allFiles.slice(offset, offset + limit);
 await fs.mkdir(outDir, { recursive: true });
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({
+  headless: true,
+  ...(process.env.E2E_EXECUTABLE_PATH ? { executablePath: process.env.E2E_EXECUTABLE_PATH } : {}),
+});
 const results = [];
 const writePartialReport = async () => {
   await fs.writeFile(path.join(outDir, "partial-report.json"), JSON.stringify({ schema: "digital-evidence.e2e-batch-local.partial.v1", baseUrl, requestedLimit: limit, processed: results.length, results }, null, 2), "utf8");
@@ -30,16 +35,29 @@ for (const [index, fixture] of fixtures.entries()) {
   page.on("console", (message) => { if (message.type() === "error") result.consoleErrors.push(message.text()); });
   page.on("pageerror", (error) => result.pageErrors.push(error.stack || error.message));
   page.on("response", (response) => {
-    if (response.url().includes("/api/")) result.apiResponses.push({ url: response.url(), status: response.status(), method: response.request().method() });
+    if (response.url().includes("/api/")) {
+      const url = response.url();
+      result.apiResponses.push({ url, status: response.status(), method: response.request().method() });
+      if (/\/api\/(?:slips\/extract|slips\/slipvision|legal\/tlex)/u.test(url)) {
+        result.externalProviderCall = url;
+      }
+    }
   });
   try {
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await page.route(/\/api\/(?:slips\/extract|slips\/slipvision|legal\/tlex)/u, async (route) => {
+      result.externalProviderCall = route.request().url();
+      await route.abort("blockedbyclient");
+    });
     await page.locator("#evidence-file-input").waitFor({ state: "attached", timeout: 30_000 });
     await page.waitForTimeout(500);
     await page.locator("#evidence-file-input").setInputFiles(fixture);
-    await page.getByText(path.basename(fixture), { exact: false }).first().waitFor({ state: "visible", timeout: 30_000 });
+    await page.waitForFunction((expectedName) => document.body?.innerText.includes(expectedName), path.basename(fixture), { timeout: 30_000 });
     await page.getByRole("button", { name: /เริ่มประมวลผลพยานหลักฐาน/ }).click();
     await page.waitForFunction(() => !/กำลังประมวลผลแบบ Cross-Matching|กำลังสกัดพยานหลักฐานระดับพิกเซล/.test(document.body?.innerText || ""), undefined, { timeout: 120_000 });
+    if (result.externalProviderCall) {
+      throw new Error(`external provider call detected during local-only batch: ${result.externalProviderCall}`);
+    }
     const body = await page.locator("body").innerText();
     const candidateCount = Number(body.match(/สลิปที่ตรวจพบ (\d+) ใบ/)?.[1] || 0);
     const autoYoloFinished = body.includes("เพิ่ม candidate รอตรวจ") || body.includes("สกัดด้วย YOLO + Tesseract ไม่สำเร็จ");
@@ -67,6 +85,9 @@ for (const [index, fixture] of fixtures.entries()) {
       needsReview: traceCandidates.filter((candidate) => candidate.needsReview === true && candidate.isConfirmed !== true).length,
       sourceSha256Present: traceCandidateItems.filter(({ item, candidate }) => typeof (candidate.sourceSha256 || candidate.source?.sha256 || item.source?.sha256) === "string" && (candidate.sourceSha256 || candidate.source?.sha256 || item.source?.sha256).length === 64).length,
       sourcePagePresent: traceCandidateItems.filter(({ item, candidate }) => Number.isInteger(candidate.chatPageNumber) || Number.isInteger(candidate.dossierPageNumber) || (Array.isArray(item.chatPages) && item.chatPages.length > 0)).length,
+      searchableOverlayVisible: body.includes("Searchable text overlay"),
+      enhancementArtifactsVisible: body.includes("Enhancement artifacts"),
+      stitchAuditVisible: body.includes("Stitch audit"),
       noExternalProviderCall: !result.apiResponses.some((item) => item.url.includes("/api/slips/extract")),
       consoleErrors: result.consoleErrors.length,
       pageErrors: result.pageErrors.length,
@@ -99,6 +120,9 @@ const report = {
   needsReview: results.reduce((sum, item) => sum + (item.assertions?.needsReview || 0), 0),
   sourceSha256Present: results.reduce((sum, item) => sum + (item.assertions?.sourceSha256Present || 0), 0),
   sourcePagePresent: results.reduce((sum, item) => sum + (item.assertions?.sourcePagePresent || 0), 0),
+  searchableOverlayVisible: results.filter((item) => item.assertions?.searchableOverlayVisible).length,
+  enhancementArtifactsVisible: results.filter((item) => item.assertions?.enhancementArtifactsVisible).length,
+  stitchAuditVisible: results.filter((item) => item.assertions?.stitchAuditVisible).length,
   providerCalls: results.reduce((sum, item) => sum + (item.assertions?.noExternalProviderCall ? 0 : 1), 0),
   consoleErrorCases: results.filter((item) => (item.assertions?.consoleErrors || 0) > 0).length,
   pageErrorCases: results.filter((item) => (item.assertions?.pageErrors || 0) > 0).length,

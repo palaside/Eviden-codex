@@ -26,14 +26,21 @@ function isHighConfidenceStructuredSlipRegion(region) {
 
 function isStrongPartialSlipRegion(region) {
   if (!(typeof region.amount === "number" && Number.isFinite(region.amount) && region.amount > 0)
-    || typeof region.referenceNo !== "string"
-    || region.referenceNo.replace(/[^\p{L}\p{N}]/gu, "").length < 14
-    || region.referenceConfidence < 0.8
     || typeof region.rawText !== "string") return false;
 
   const normalized = region.rawText.normalize("NFKC").replace(/\s+/gu, "").toLocaleLowerCase();
   const hasReferenceCue = /(?:รหัส|เลขที่)อ้างอ.{0,2}ง|reference|transactionid/u.test(normalized);
   const hasSuccessCue = /โอนเงิน.{0,8}(?:เร็จ|เรือ)|โอน.{0,8}ส[ํำ]าเร็จ|transfer.{0,12}success/u.test(normalized);
+  // A focused OCR crop is stronger evidence than a noisy full-page reference.
+  // Keep it review-only, but do not discard a visible slip merely because OCR
+  // shortened the reference number.
+  if (region.visualCropEvidence === true
+    && hasSuccessCue
+    && region.amountConfidence >= 0.55
+    && (region.bankName || region.date || region.senderName || region.receiverName)) return true;
+  if (typeof region.referenceNo !== "string"
+    || region.referenceNo.replace(/[^\p{L}\p{N}]/gu, "").length < 14
+    || region.referenceConfidence < 0.8) return false;
   if (!hasReferenceCue) return false;
   if (hasSuccessCue) return true;
 
@@ -65,6 +72,19 @@ function isStrongPartialSlipRegion(region) {
   return true;
 }
 
+function isVisualCropSlipRegion(region) {
+  if (region.visualCropEvidence !== true
+    || !(typeof region.amount === "number" && Number.isFinite(region.amount) && region.amount > 0)
+    || region.amountConfidence < 0.55) return false;
+  if (typeof region.rawText !== "string") return true;
+  const normalized = region.rawText.normalize("NFKC").replace(/\s+/gu, "").toLocaleLowerCase();
+  const hasTransferCue = /โอนเงิน|transfer|success/u.test(normalized);
+  const hasAmountCue = /จ[ํำ]านวนเงิน|ยอดเงิน|amount|บาท|thb/u.test(normalized);
+  return (hasTransferCue && hasAmountCue
+    && (region.bankName || region.date || region.senderName || region.receiverName))
+    || Boolean(region.referenceNo || region.senderName || region.receiverName);
+}
+
 /**
  * @template {{ bounds: { x0: number; y0: number; x1: number; y1: number } }} T
  * @param {T[]} regions
@@ -87,23 +107,27 @@ export function filterTextOnlySlipRegionsForJob(regions, {
     });
     if (hasQrAnchor) return true;
 
-    const hasSlipLikeOcr = isHighConfidenceStructuredSlipRegion(region) || isStrongPartialSlipRegion(region);
+    const hasSlipLikeOcr = isHighConfidenceStructuredSlipRegion(region)
+      || isStrongPartialSlipRegion(region)
+      || isVisualCropSlipRegion(region);
     if (!hasSlipLikeOcr) return false;
     const regionArea = Math.max(1, (x1 - x0) * (y1 - y0));
     return visualCandidates.some(({ objectTypeCandidate, confidence, bounds }) => {
       const overlapWidth = Math.max(0, Math.min(x1, bounds.x + bounds.width) - Math.max(x0, bounds.x));
       const overlapHeight = Math.max(0, Math.min(y1, bounds.y + bounds.height) - Math.max(y0, bounds.y));
       const overlapRatio = overlapWidth * overlapHeight / regionArea;
+      if (isVisualCropSlipRegion(region)) return overlapRatio >= 0.5;
       if (/^image(?:_|$)/u.test(objectTypeCandidate || "")) {
         // Color-mask contours can misclassify a large chat bubble as an image.
         // A low-confidence heuristic object is not sufficient evidence for a
         // no-QR OCR candidate; keep it reviewable in the trace instead.
-        return overlapRatio >= 0.5 && (confidence == null || confidence >= 0.65);
+        return overlapRatio >= 0.5
+          && (confidence == null || confidence >= 0.65 || region.visualCropEvidence === true);
       }
-      // A text bubble is normally context evidence only. However, some
-      // embedded slips are visually merged with the chat bubble contour. Keep
-      // that case reviewable only when the contour almost fully covers the
-      // OCR region and the OCR also contains an account-like field.
+      // A text bubble is normally context evidence only. Preserve a strong,
+      // review-only slip-shaped OCR region when it carries a masked account
+      // token and the contour covers most of the OCR region; the candidate is
+      // still never auto-confirmed. Visual crops are handled above.
       const accountEvidence = [region.senderAccount, region.receiverAccount]
         .some((account) => typeof account === "string" && /[xX*]{2,}/u.test(account));
       return overlapRatio >= 0.75 && accountEvidence;

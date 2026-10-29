@@ -125,6 +125,28 @@ def read_image(path: Path) -> np.ndarray:
     return image
 
 
+def build_full_image_fallback_detection(image: np.ndarray, qr_payload: str | None) -> dict | None:
+    """Keep a QR-anchored standalone slip available when YOLO misses its box.
+
+    This is deliberately review-only: confidence is zero and the reason is
+    carried into the API warning. It is only enabled after QR evidence exists,
+    so a chat screenshot without a detected slip is never promoted by this
+    fallback.
+    """
+    if not qr_payload or image is None or image.ndim < 2:
+        return None
+    height, width = image.shape[:2]
+    if width < 1 or height < 1:
+        return None
+    return {
+        "crop": image.copy(),
+        "bbox": {"x1": 0, "y1": 0, "x2": width, "y2": height},
+        "confidence": 0.0,
+        "index": 1,
+        "fallback_reason": "YOLO ไม่สร้างกรอบ แต่ QR ในภาพเต็มถอดได้; ใช้ full-image crop รอตรวจทาน",
+    }
+
+
 def empty_data(raw_text: list[str], amount: float | None, qr_payload: str | None) -> dict:
     data = parse_ocr_lines(raw_text)
     if amount is not None:
@@ -341,6 +363,14 @@ def main() -> None:
     image = read_image(args.image)
     locator = SlipLocator(str(args.model), device=args.device)
     detections = locator.extract_slips(image, conf_thresh=args.confidence)
+    if not detections and args.engine == "multiengine":
+        # A standalone slip can be visually clear while the trained detector
+        # misses its outer box because of white margins. Require a QR decode
+        # before using the full frame; chat-only images remain untouched.
+        full_image_qr = decode_zxing_from_crop(image) or decode_qr_from_crop(image)
+        fallback = build_full_image_fallback_detection(image, full_image_qr)
+        if fallback:
+            detections = [fallback]
     cases = []
     for detection in detections:
         crop = detection["crop"]
@@ -359,6 +389,8 @@ def main() -> None:
         data["warnings"].append(
             "OCR/QR enhancement จาก crop เดียวกัน: gamma → median → bilateral → CLAHE → unsharp → upscale"
         )
+        if detection.get("fallback_reason"):
+            data["warnings"].append(detection["fallback_reason"])
         cases.append({
             "bbox_1000": [
                 detection["bbox"]["y1"] / image.shape[0] * 1000,

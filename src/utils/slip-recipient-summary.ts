@@ -36,6 +36,7 @@ export interface SlipRecipientSummaryRecord extends DetectedSlipRecipientRecord 
   suggestedRecipientName?: string;
   suggestedFromOccurrenceId?: string;
   ocrProposedRecipientName?: string;
+  ocrRecipientVariants?: string[];
   corroboratedRecipientName?: string;
   corroboratedFromOccurrenceId?: string;
   receiverNameNeedsReview: boolean;
@@ -99,6 +100,7 @@ export function summarizeDetectedSlipRecipients(records: DetectedSlipRecipientRe
       || (receiverNameManuallyReviewed && !record.isConfirmed);
     const unresolvedOcrConflict = hasUnresolvedRecipientNameRetryConflict(record);
     const proposedName = removeThaiTitlePrefix(record.data.receiver?.name).replace(/\s+/g, " ").trim();
+    const ocrRecipientVariants = collectRecipientOcrVariants(record);
     const extractedName = unresolvedOcrConflict ? "" : proposedName;
     const evidenceCandidates = getExactEvidenceKey(record)
       ? evidenceNameCandidates.get(getExactEvidenceKey(record)!)
@@ -141,6 +143,7 @@ export function summarizeDetectedSlipRecipients(records: DetectedSlipRecipientRe
       receiverNameOcrConflict,
       receiverNameManuallyReviewed,
       ...(unresolvedOcrConflict && proposedName ? { ocrProposedRecipientName: proposedName } : {}),
+      ...(ocrRecipientVariants.length > 1 ? { ocrRecipientVariants } : {}),
       ...(corroboratedName ? {
         corroboratedRecipientName: corroboratedName.name,
         corroboratedFromOccurrenceId: corroboratedName.occurrenceId,
@@ -220,6 +223,28 @@ function hasSlipSupportedRecipientName(record: DetectedSlipRecipientRecord): boo
 
 function normalizeOcrName(value?: string | null): string {
   return removeThaiTitlePrefix(value).replace(/\s+/gu, "").trim();
+}
+
+function collectRecipientOcrVariants(record: DetectedSlipRecipientRecord): string[] {
+  const variants: string[] = [];
+  const add = (value?: string | null) => {
+    const normalized = removeThaiTitlePrefix(value).replace(/\s+/gu, " ").trim();
+    if (normalized && !variants.includes(normalized)) variants.push(normalized);
+  };
+
+  add(record.data.receiver?.name);
+  const receiverBoxes = (record.ocrTextBoxes ?? []).filter((box) =>
+    box.supportsFields?.includes("receiver_name") && box.bounds,
+  );
+  for (const attempt of record.ocrDiagnosticTrace?.attempts ?? []) {
+    for (const line of attempt.lines) {
+      if (!line.text.trim()) continue;
+      if (receiverBoxes.length > 0 && receiverBoxes.some((box) => overlapsSameTextBox(box.bounds, line.bounds))) {
+        add(line.text);
+      }
+    }
+  }
+  return variants;
 }
 
 function overlapsSameTextBox(a: SlipOcrTraceBounds, b: SlipOcrTraceBounds): boolean {

@@ -3,8 +3,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 const root = process.cwd();
-const outDir = path.resolve(root, "For Test Results", "enterprise-ocr-groundtruth-benchmark-3450");
-const baseUrl = "http://localhost:3450/";
+const outDir = path.resolve(root, process.env.E2E_OUT_DIR || "For Test Results/enterprise-ocr-groundtruth-benchmark-3450");
+const baseUrl = process.env.E2E_BASE_URL || "http://localhost:3450/";
 const cases = [
   {
     id: "chat-3000",

@@ -176,13 +176,23 @@ export async function POST(request: Request) {
     if (!aiResponse.ok) {
       const errorText = await aiResponse.text();
       const providerStatus = classifyExternalProviderStatus(aiResponse.status);
+      const quotaExceeded = aiResponse.status === 429
+        || /quota|rate limit|resource_exhausted|daily limit/i.test(errorText);
+      const retryAfterMatch = errorText.match(/retryDelay[^\d]*(\d+(?:\.\d+)?)s/i);
+      const retryAfterSeconds = retryAfterMatch ? Math.ceil(Number(retryAfterMatch[1])) : null;
+      const responseHeaders = new Headers({ "Cache-Control": "no-store" });
+      if (retryAfterSeconds && Number.isFinite(retryAfterSeconds)) {
+        responseHeaders.set("Retry-After", String(retryAfterSeconds));
+      }
       return NextResponse.json(
         {
           success: false,
           message: `Vision AI ตอบกลับข้อผิดพลาด (${aiResponse.status}): ${errorText}`,
+          provider: "Gemini",
+          quota_exceeded: quotaExceeded,
           ...providerStatus,
         },
-        { status: 502 }
+        { status: quotaExceeded ? 429 : 502, headers: responseHeaders }
       );
     }
 
