@@ -32,6 +32,27 @@ const failure = (code: string, message: string, status: number) => Response.json
   success: false, reviewOnly: true, status: "review_required", error: { code, message },
 }, { status, headers: { "Cache-Control": "no-store" } });
 
+function normalizedCoordinateSpace(orientation: number | undefined, encodedWidth: number, encodedHeight: number, width: number, height: number) {
+  const sourceExifOrientation = orientation && orientation >= 1 && orientation <= 8 ? orientation : 1;
+  // Affine pixel-edge coordinates: x' = a*x + c*y + e; y' = b*x + d*y + f.
+  const transforms = [
+    [1, 0, 0, 1, 0, 0], [-1, 0, 0, 1, encodedWidth, 0],
+    [-1, 0, 0, -1, encodedWidth, encodedHeight], [1, 0, 0, -1, 0, encodedHeight],
+    [0, 1, 1, 0, 0, 0], [0, 1, -1, 0, encodedHeight, 0],
+    [0, -1, -1, 0, encodedHeight, encodedWidth], [0, -1, 1, 0, 0, encodedWidth],
+  ];
+  const encodedToNormalized = transforms[sourceExifOrientation - 1];
+  const [a, b, c, d, e, f] = encodedToNormalized;
+  const determinant = a * d - b * c;
+  const normalizedToEncoded = [d, -b, -c, a, c * f - d * e, b * e - a * f]
+    .map((value) => value === 0 ? 0 : value / determinant);
+  return {
+    name: "exif-normalized", sourceExifOrientation,
+    encodedDimensions: { width: encodedWidth, height: encodedHeight },
+    normalizedDimensions: { width, height }, encodedToNormalized, normalizedToEncoded,
+  };
+}
+
 async function readForm(request: Request) {
   const limit = MAX_UPLOAD_BYTES + 1024 * 1024;
   if (Number(request.headers.get("content-length")) > limit) throw new ResearchError("UPLOAD_TOO_LARGE", "ไฟล์เกิน 20 MB", 413);
@@ -91,14 +112,19 @@ export async function POST(request: Request) {
     const decoder = sharp(bytes, { limitInputPixels: MAX_SOURCE_PIXELS });
     const metadata = await decoder.metadata();
     if (metadata.format !== IMAGE_TYPES.get(file.type) || (metadata.pages || 1) !== 1) throw new ResearchError("INVALID_IMAGE_CONTENT", "ชนิดภาพไม่ตรงกับข้อมูลหรือเป็นภาพเคลื่อนไหว", 415);
-    // Keep encoded source coordinates; no auto-rotation or scaling before detection.
-    const { data, info } = await decoder.toColourspace("srgb").ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    // Apply EXIF once. Generators and detector consume the same normalized
+    // raster, while source bytes and their identity remain untouched.
+    const { data, info } = await decoder.rotate().toColourspace("srgb").ensureAlpha().raw().toBuffer({ resolveWithObject: true });
     const { width, height } = info;
     if (info.channels !== 4 || width * height > MAX_SOURCE_PIXELS) throw new ResearchError("PIXEL_LIMIT", "ภาพเกินขีดจำกัดพิกเซลสำหรับ research run", 413);
+    const coordinateSpace = normalizedCoordinateSpace(metadata.orientation, metadata.width, metadata.height, width, height);
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "digital-evidence-research-"));
     const sourcePath = path.join(tempDir, `source.${metadata.format}`);
     await fs.writeFile(sourcePath, bytes, { flag: "wx" });
-    const detections = normalizeDetections({ detections: await detectSlips(sourcePath), imageWidth: width, imageHeight: height });
+    const detectorPath = path.join(tempDir, "detector-normalized.png");
+    // Encoding raw pixels without metadata prevents a second EXIF rotation in OpenCV.
+    await fs.writeFile(detectorPath, await sharp(data, { raw: { width, height, channels: 4 } }).png().toBuffer(), { flag: "wx" });
+    const detections = normalizeDetections({ detections: await detectSlips(detectorPath), imageWidth: width, imageHeight: height });
     if (detections.some(({ bbox: b }: Detection) => b.x + b.width > width || b.y + b.height > height)) throw new ResearchError("INVALID_DETECTIONS", "กรอบสลิปอยู่นอกภาพต้นฉบับ");
     const baseManifest = createResearchRunManifest({ sourceFileName: file.name, sourceSha256: sha256, sourceDimensions: { width, height }, expectedSlipCount: 2 });
     const artifacts: Artifact[] = [];
@@ -122,6 +148,7 @@ export async function POST(request: Request) {
     if (digest(await fs.readFile(sourcePath)) !== sha256) throw new ResearchError("SOURCE_CHANGED", "source hash เปลี่ยนระหว่างประมวลผล", 500);
     const manifest = {
       ...baseManifest,
+      coordinateSpace,
       streamA: { artifacts: streamA.artifacts, detections: [] },
       streamB: { detections, slips: streamB.slips },
       detectionResult: evaluateDetectionGate({ expectedSlipCount: 2, detectedCount: detections.length }),
@@ -130,9 +157,13 @@ export async function POST(request: Request) {
     console.info("[dual-stream]", JSON.stringify({ sourceSha256: sha256, detections: detections.length, artifacts: artifacts.length, reviewOnly: true }));
     return Response.json({ success: true, manifest, artifacts, reviewOnly: true }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
-    const known = error instanceof ResearchError;
-    console.warn("[dual-stream]", known ? error.code : "GENERATION_FAILED");
-    return failure(known ? error.code : "GENERATION_FAILED", known ? error.message : "สร้างผลวิจัยไม่ได้ ต้นฉบับยังคงเดิมและต้องตรวจทาน", known ? error.status : 500);
+    // Sharp enforces its limit before returning metadata or pixels, so the
+    // explicit dimension check above cannot classify this rejection itself.
+    const failureError = error instanceof Error && /Input image exceeds pixel limit/i.test(error.message)
+      ? new ResearchError("PIXEL_LIMIT", "ภาพเกินขีดจำกัดพิกเซลสำหรับ research run", 413) : error;
+    const known = failureError instanceof ResearchError;
+    console.warn("[dual-stream]", known ? failureError.code : "GENERATION_FAILED");
+    return failure(known ? failureError.code : "GENERATION_FAILED", known ? failureError.message : "สร้างผลวิจัยไม่ได้ ต้นฉบับยังคงเดิมและต้องตรวจทาน", known ? failureError.status : 500);
   } finally {
     if (tempDir) await fs.rm(tempDir, { recursive: true, force: true }).catch(() => console.warn("[dual-stream] TEMP_CLEANUP_FAILED"));
     running = false;
