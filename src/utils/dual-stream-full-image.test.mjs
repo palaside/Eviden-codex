@@ -116,3 +116,88 @@ test("returns partial when an artifact writer fails but retains successful recor
   assert.equal(artifacts.length, 8);
   assert.equal(records.some(({ metadata }) => metadata.variant === "brightness-gamma"), false);
 });
+
+test("rejects a writer that mutates its metadata copy before returning the record", async () => {
+  let calls = 0;
+  const validWriter = createWriter([]);
+  const result = await createFullImageVariants({
+    source: { fileName: "chatv3 (15).jpg", bytes: SOURCE_BYTES },
+    sourceSha256: SOURCE_SHA256,
+    width: 2,
+    height: 2,
+    pixelBuffer: makePixels(),
+    artifactWriter: async (input) => {
+      calls += 1;
+      if (calls !== 1) return validWriter(input);
+      const forgedHash = "0".repeat(64);
+      input.metadata.sourceSha256 = forgedHash;
+      input.metadata.artifactSha256 = forgedHash;
+      input.metadata.artifactPath = `source/${forgedHash}`;
+      input.metadata.dimensions = { width: 99, height: 99 };
+      return createArtifactRecord({
+        sourceFileName: input.metadata.sourceFileName,
+        sourceSha256: input.metadata.sourceSha256,
+        artifactPath: input.metadata.artifactPath,
+        artifactSha256: input.metadata.artifactSha256,
+        stream: input.metadata.stream,
+        artifactType: input.metadata.artifactType,
+        dimensions: input.metadata.dimensions,
+        transform: input.metadata.transform,
+        reviewOnly: input.metadata.reviewOnly,
+      });
+    },
+  });
+
+  assert.equal(result.status, "partial");
+  assert.equal(result.artifacts.length, 8);
+  assert.equal(result.artifacts.some(({ variant }) => variant === "original-reference"), false);
+  assert.ok(result.artifacts.every(({ sourceSha256 }) => sourceSha256 === SOURCE_SHA256));
+});
+
+test("rejects returned records missing required provenance fields", async () => {
+  for (const missingField of ["sourceFileName", "dimensions", "transform"]) {
+    let calls = 0;
+    const validWriter = createWriter([]);
+    const result = await createFullImageVariants({
+      source: { fileName: "chatv3 (15).jpg", bytes: SOURCE_BYTES },
+      sourceSha256: SOURCE_SHA256,
+      width: 2,
+      height: 2,
+      pixelBuffer: makePixels(),
+      artifactWriter: async (input) => {
+        calls += 1;
+        const record = await validWriter(input);
+        if (calls !== 1) return record;
+        const incomplete = { ...record };
+        delete incomplete[missingField];
+        return incomplete;
+      },
+    });
+
+    assert.equal(result.status, "partial", `missing ${missingField} must not report success`);
+    assert.equal(result.artifacts.length, 8);
+    assert.equal(result.artifacts.some(({ variant }) => variant === "original-reference"), false);
+  }
+});
+
+test("rejects returned records whose dimensions or transform differ from the generated artifact", async () => {
+  let calls = 0;
+  const validWriter = createWriter([]);
+  const result = await createFullImageVariants({
+    source: { fileName: "chatv3 (15).jpg", bytes: SOURCE_BYTES },
+    sourceSha256: SOURCE_SHA256,
+    width: 2,
+    height: 2,
+    pixelBuffer: makePixels(),
+    artifactWriter: async (input) => {
+      calls += 1;
+      const record = await validWriter(input);
+      if (calls !== 1) return record;
+      return { ...record, dimensions: { width: 999, height: 999 } };
+    },
+  });
+
+  assert.equal(result.status, "partial");
+  assert.equal(result.artifacts.length, 8);
+  assert.equal(result.artifacts.some(({ variant }) => variant === "original-reference"), false);
+});

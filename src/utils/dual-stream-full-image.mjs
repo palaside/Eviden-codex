@@ -58,6 +58,26 @@ function concatBytes(parts) {
   return output;
 }
 
+function cloneMetadata(value) {
+  return structuredClone(value);
+}
+
+function freezeMetadata(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) freezeMetadata(child);
+  return Object.freeze(value);
+}
+
+function metadataEqual(actual, expected) {
+  if (Object.is(actual, expected)) return true;
+  if (!actual || !expected || typeof actual !== "object" || typeof expected !== "object") return false;
+  if (Array.isArray(actual) !== Array.isArray(expected)) return false;
+  const actualKeys = Object.keys(actual).sort();
+  const expectedKeys = Object.keys(expected).sort();
+  return actualKeys.length === expectedKeys.length
+    && actualKeys.every((key, index) => key === expectedKeys[index] && metadataEqual(actual[key], expected[key]));
+}
+
 async function encodePng(pixels, width, height) {
   if (typeof CompressionStream !== "function") throw new Error("PNG encoding requires CompressionStream support");
   const stride = width * 4;
@@ -255,17 +275,22 @@ function makeVariant(variant, sourcePixels, width, height) {
   throw new TypeError(`Unsupported Stream A variant: ${variant.variant}`);
 }
 
-function validateResult(record, metadata) {
+function validateResult(record, expected) {
   if (!record || typeof record !== "object") throw new TypeError("artifactWriter must return an ArtifactRecord");
-  if (record.sourceSha256?.toLowerCase() !== metadata.sourceSha256
-    || record.artifactSha256?.toLowerCase() !== metadata.artifactSha256
-    || record.artifactPath !== metadata.artifactPath
-    || record.stream !== "A"
-    || record.artifactType !== metadata.artifactType
-    || record.reviewOnly !== true) {
-    throw new Error(`artifactWriter returned an inconsistent record for ${metadata.variant}`);
+  const requiredFields = [
+    "sourceFileName", "sourceSha256", "artifactPath", "artifactSha256", "stream", "artifactType",
+    "parentArtifact", "bbox", "dimensions", "transform", "reviewOnly",
+  ];
+  const missingFields = requiredFields.filter((field) => !Object.hasOwn(record, field));
+  if (missingFields.length) {
+    throw new TypeError(`artifactWriter returned an incomplete ArtifactRecord for ${expected.variant}: missing ${missingFields.join(", ")}`);
   }
-  return { ...record, variant: metadata.variant };
+  for (const field of requiredFields) {
+    if (!metadataEqual(record[field], expected[field])) {
+      throw new Error(`artifactWriter returned mismatched ${field} for ${expected.variant}`);
+    }
+  }
+  return { ...cloneMetadata(record), variant: expected.variant };
 }
 
 export async function createFullImageVariants({ source, sourceSha256, width, height, pixelBuffer, artifactWriter }) {
@@ -289,20 +314,26 @@ export async function createFullImageVariants({ source, sourceSha256, width, hei
       const bytes = isOriginal ? new Uint8Array(sourceBytes) : await encodePng(rendered.pixels, rendered.width, rendered.height);
       if (bytes.length === 0) throw new Error(`${variant.variant} produced empty bytes`);
       const artifactSha256 = isOriginal ? normalizedSourceSha : await sha256(bytes);
-      const metadata = {
+      const expectedMetadata = freezeMetadata({
         sourceFileName: source.fileName,
         sourceSha256: normalizedSourceSha,
         artifactSha256,
         artifactPath: isOriginal ? `source/${normalizedSourceSha}` : `derived/stream-a/${variant.variant}.png`,
         stream: "A",
         artifactType: isOriginal ? "original_reference" : "full_image_variant",
+        parentArtifact: null,
+        bbox: null,
         dimensions: { width: rendered.width, height: rendered.height },
         transform: rendered.transform,
         variant: variant.variant,
         reviewOnly: true,
-      };
-      const record = await artifactWriter({ bytes: new Uint8Array(bytes), artifactName: variant.variant, metadata });
-      artifacts.push(validateResult(record, metadata));
+      });
+      const record = await artifactWriter({
+        bytes: new Uint8Array(bytes),
+        artifactName: variant.variant,
+        metadata: cloneMetadata(expectedMetadata),
+      });
+      artifacts.push(validateResult(record, expectedMetadata));
     } catch {
       // Keep successful artifacts; a storage or encoding failure makes the run partial.
     }
