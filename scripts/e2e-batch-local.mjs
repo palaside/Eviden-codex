@@ -8,6 +8,7 @@ const outDir = path.resolve(root, process.env.E2E_OUT_DIR || path.join("For Test
 const limit = Number(process.env.E2E_BATCH_LIMIT || 20);
 const requestedRoots = (process.env.E2E_FIXTURE_ROOTS || "For Test\\แชทที่ 1;For Test\\แชทที่ 2;For Test\\แชทที่ 3;For Test\\Done").split(";").filter(Boolean);
 const offset = Math.max(0, Number(process.env.E2E_BATCH_OFFSET || 0));
+const processingTimeoutMs = Math.max(120_000, Number(process.env.E2E_PROCESS_TIMEOUT_MS || 600_000));
 const allFiles = [];
 for (const relativeRoot of requestedRoots) {
   const absoluteRoot = path.resolve(root, relativeRoot);
@@ -52,9 +53,9 @@ for (const [index, fixture] of fixtures.entries()) {
     await page.locator("#evidence-file-input").waitFor({ state: "attached", timeout: 30_000 });
     await page.waitForTimeout(500);
     await page.locator("#evidence-file-input").setInputFiles(fixture);
-    await page.waitForFunction((expectedName) => document.body?.innerText.includes(expectedName), path.basename(fixture), { timeout: 30_000 });
+    await page.waitForFunction((expectedName) => document.body?.innerText.includes(expectedName), path.basename(fixture), { timeout: processingTimeoutMs });
     await page.getByRole("button", { name: /เริ่มประมวลผลพยานหลักฐาน/ }).click();
-    await page.waitForFunction(() => !/กำลังประมวลผลแบบ Cross-Matching|กำลังสกัดพยานหลักฐานระดับพิกเซล/.test(document.body?.innerText || ""), undefined, { timeout: 120_000 });
+    await page.waitForFunction(() => !/กำลังประมวลผลแบบ Cross-Matching|กำลังสกัดพยานหลักฐานระดับพิกเซล/.test(document.body?.innerText || ""), undefined, { timeout: processingTimeoutMs });
     if (result.externalProviderCall) {
       throw new Error(`external provider call detected during local-only batch: ${result.externalProviderCall}`);
     }
@@ -87,6 +88,7 @@ for (const [index, fixture] of fixtures.entries()) {
       sourcePagePresent: traceCandidateItems.filter(({ item, candidate }) => Number.isInteger(candidate.chatPageNumber) || Number.isInteger(candidate.dossierPageNumber) || (Array.isArray(item.chatPages) && item.chatPages.length > 0)).length,
       searchableOverlayVisible: body.includes("Searchable text overlay"),
       enhancementArtifactsVisible: body.includes("Enhancement artifacts"),
+      reviewDerivedPreviewVisible: body.includes("ภาพอนุพันธ์ Upscayl สำหรับช่วยดู/อ่าน"),
       stitchAuditVisible: body.includes("Stitch audit"),
       noExternalProviderCall: !result.apiResponses.some((item) => item.url.includes("/api/slips/extract")),
       consoleErrors: result.consoleErrors.length,
@@ -123,6 +125,7 @@ const report = {
   searchableOverlayVisible: results.filter((item) => item.assertions?.searchableOverlayVisible).length,
   enhancementArtifactsVisible: results.filter((item) => item.assertions?.enhancementArtifactsVisible).length,
   stitchAuditVisible: results.filter((item) => item.assertions?.stitchAuditVisible).length,
+  reviewDerivedPreviewVisible: results.filter((item) => item.assertions?.reviewDerivedPreviewVisible).length,
   providerCalls: results.reduce((sum, item) => sum + (item.assertions?.noExternalProviderCall ? 0 : 1), 0),
   consoleErrorCases: results.filter((item) => (item.assertions?.consoleErrors || 0) > 0).length,
   pageErrorCases: results.filter((item) => (item.assertions?.pageErrors || 0) > 0).length,
@@ -130,4 +133,4 @@ const report = {
 };
 await fs.writeFile(path.join(outDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
 console.log(JSON.stringify({ outDir, processed: report.processed, failed: report.failed, candidatesDetected: report.candidatesDetected, traceCandidates: report.traceCandidates, amountPresent: report.amountPresent, referencePresent: report.referencePresent, senderNamePresent: report.senderNamePresent, receiverNamePresent: report.receiverNamePresent, needsReview: report.needsReview, sourceSha256Present: report.sourceSha256Present, sourcePagePresent: report.sourcePagePresent, providerCalls: report.providerCalls, consoleErrorCases: report.consoleErrorCases, pageErrorCases: report.pageErrorCases }, null, 2));
-if (report.failed > 0 || report.providerCalls > 0 || report.pageErrorCases > 0) process.exitCode = 1;
+if (report.failed > 0 || report.providerCalls > 0 || report.pageErrorCases > 0 || report.results.some((item) => item.assertions?.reviewDerivedPreviewVisible === false)) process.exitCode = 1;

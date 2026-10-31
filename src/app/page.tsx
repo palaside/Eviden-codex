@@ -1,4 +1,6 @@
 "use client";
+/* The evidence viewer intentionally renders data/blob URLs directly; Next Image cannot optimize these sources. */
+/* eslint-disable @next/next/no-img-element */
 
 import React, { useState, useRef, useEffect, useMemo, useSyncExternalStore } from "react";
 import type { SlipExtraction } from "@/schemas/slip.schema";
@@ -73,6 +75,18 @@ import { clearEvidenceQueueSnapshot, EXTRACTION_VERSION, loadEvidenceQueueSnapsh
 import { buildEvidenceDiagnosticTrace } from "@/utils/evidence-diagnostic-trace.mjs";
 import { classifyUniqueEvidenceItems } from "@/utils/evidence-detection-pipeline.mjs";
 import { matchLegalSignalsInText, getLegalSignalDictionaryMetadata } from "@/utils/legal-signal-matcher.mjs";
+import { selectDerivedProcessingSource } from "@/utils/derived-processing-source.mjs";
+import { attachResearchRun, formatReviewCanvasLabel, getResearchArtifacts, getReviewPreviewSource, prepareResearchQueueForPersistence, resolveReviewCanvasSource } from "@/utils/review-preview-source.mjs";
+import { createArtifactRecord, createResearchRunManifest } from "@/utils/dual-stream-enhancement.mjs";
+
+type ResearchArtifact = ReturnType<typeof createArtifactRecord> & { variant?: string; url?: string };
+type ResearchRunManifest = Omit<ReturnType<typeof createResearchRunManifest>, "streamA" | "streamB"> & {
+  streamA: { artifacts: ResearchArtifact[]; detections: unknown[] };
+  streamB: {
+    detections: Array<{ index?: number; bbox: { x: number; y: number; width: number; height: number }; confidence?: number | null }>;
+    slips: Array<{ index: number; cropOriginal: ResearchArtifact; cropVariants: ResearchArtifact[] }>;
+  };
+};
 
 interface ExtractionMetadata {
   file_name: string;
@@ -241,6 +255,9 @@ export default function MasterEvidenceWorkspace() {
     id: string;
     file: File;
     previewUrl: string;
+    reviewPreviewUrl?: string;
+    researchRun?: ResearchRunManifest;
+    selectedReviewArtifactId?: string;
     category: "PENDING" | "SLIP" | "CHAT";
     extractionVersion?: number;
     detectType?: string;
@@ -265,6 +282,18 @@ export default function MasterEvidenceWorkspace() {
     stitchingWarnings?: string[];
     embeddedSlips?: EmbeddedSlipRecord[];
     processingWarnings?: string[];
+    processingFile?: File;
+    enhancementArtifact?: {
+      status: string;
+      engine?: string | null;
+      model?: string | null;
+      scale?: number | null;
+      sourceSha256?: string | null;
+      derivedSha256?: string | null;
+      sourceDimensions?: { width: number; height: number } | null;
+      derivedDimensions?: { width: number; height: number } | null;
+      reviewOnly: true;
+    };
   }>>([]);
   const [queuePersistenceReady, setQueuePersistenceReady] = useState(false);
   const [selectedItemIndex, setSelectedItemIndex] = useState<number>(0);
@@ -605,12 +634,13 @@ export default function MasterEvidenceWorkspace() {
           if (restored.stalePendingCount > 0) {
             setQueueRestoreNotice(`ผล OCR เก่า ${restored.stalePendingCount} รายการถูกถอดออกจากผลตรวจที่ยังไม่ยืนยันแล้ว; ไฟล์ต้นฉบับยังอยู่ในคิว กรุณากดเริ่มประมวลผลใหม่`);
           }
+          restored.stagedQueue = prepareResearchQueueForPersistence(restored.stagedQueue) as typeof stagedQueue;
           recomputeConfirmedEvidence(restored.stagedQueue);
           setStagedQueue((current) => {
             const knownIds = new Set(current.map((item) => item.id));
             const merged = [...restored.stagedQueue, ...current.filter((item) => !knownIds.has(item.id))];
             if (current.length === 0 && merged[0]) {
-              setPreviewImage(merged[0].previewUrl);
+              setPreviewImage(getReviewPreviewSource(merged[0]));
               setSelectedItemIndex(0);
               if (merged[0].category !== "PENDING") setEvidenceMode(merged[0].category);
               if (merged[0].data) setExtractedData(merged[0].data);
@@ -636,7 +666,7 @@ export default function MasterEvidenceWorkspace() {
   useEffect(() => {
     if (!queuePersistenceReady || loading) return;
     const timer = window.setTimeout(() => {
-      const snapshot = serializeEvidenceQueueSnapshot(stagedQueue, manifestList);
+      const snapshot = serializeEvidenceQueueSnapshot(prepareResearchQueueForPersistence(stagedQueue), manifestList);
       void saveEvidenceQueueSnapshot(snapshot).catch((error: unknown) => {
         setErrorMsg(error instanceof Error ? `บันทึกผลไว้ในเครื่องไม่สำเร็จ: ${error.message}` : "บันทึกผลไว้ในเครื่องไม่สำเร็จ");
       });
@@ -706,7 +736,7 @@ export default function MasterEvidenceWorkspace() {
       return item;
     });
     try {
-      await saveEvidenceQueueSnapshot(serializeEvidenceQueueSnapshot(nextQueue, manifestList));
+      await saveEvidenceQueueSnapshot(serializeEvidenceQueueSnapshot(prepareResearchQueueForPersistence(nextQueue), manifestList));
     } catch (error) {
       setErrorMsg(error instanceof Error ? `บันทึกสถานะการยืนยันในเครื่องไม่สำเร็จ: ${error.message}` : "บันทึกสถานะการยืนยันในเครื่องไม่สำเร็จ");
       return;
@@ -715,17 +745,17 @@ export default function MasterEvidenceWorkspace() {
     recomputeConfirmedEvidence(nextQueue);
   };
 
-  const scanSelectedSlipWithAi = async (itemId: string, engine: "gemini" | "slipvision" | "yolo" = "gemini") => {
+  const scanSelectedSlipWithAi = async (itemId: string, engine: "gemini" | "slipvision" = "gemini") => {
     const item = stagedQueue.find((entry) => entry.id === itemId);
     if (!item || item.stitchedIntoItemId || (item.status !== "done" && item.status !== "error")) return;
-    const engineLabel = engine === "slipvision" ? "SlipVision" : engine === "yolo" ? "YOLO + Tesseract" : "Gemini";
+    const engineLabel = engine === "slipvision" ? "SlipVision" : "Gemini";
     setAiScanItemId(itemId);
     setAiScanMessage(`กำลังสกัดจาก ${item.file.name} ด้วย ${engineLabel}; ผลจะรอตรวจทาน`);
     try {
       const body = new FormData();
       body.append("file", item.file, item.file.name);
       body.append("mode", "detect");
-      const response = await fetch(engine === "slipvision" ? "/api/slips/slipvision" : engine === "yolo" ? "/api/slips/yolo" : "/api/slips/extract", { method: "POST", body, cache: "no-store" });
+      const response = await fetch(engine === "slipvision" ? "/api/slips/slipvision" : "/api/slips/extract", { method: "POST", body, cache: "no-store" });
       const result = await response.json() as {
         success: boolean;
         message?: string;
@@ -778,7 +808,7 @@ export default function MasterEvidenceWorkspace() {
           added = entry.data ? 0 : 1;
           return {
             ...entry, status: "done" as const, error: undefined, meta: entry.meta || result.metadata,
-            data: entry.data ? mergeAiSlipProposal(entry.data, proposal.data, { replaceUnreviewedConflicts: engine === "yolo" }) as SlipExtraction : proposal.data,
+            data: entry.data ? mergeAiSlipProposal(entry.data, proposal.data) as SlipExtraction : proposal.data,
             sourceBounds: proposal.bounds, cropDataUrl: proposal.cropDataUrl, isConfirmed: false,
             aiProposedFields: entry.data
               ? [...new Set([...(entry.aiProposedFields || []), ...getAiFilledFields(entry.data, proposal.data)])]
@@ -792,7 +822,7 @@ export default function MasterEvidenceWorkspace() {
             const matchIndex = records.findIndex((record) => record.id === match.id);
             let mergedData = clearUnreproducedAiNames(
               records[matchIndex],
-              mergeAiSlipProposal(records[matchIndex].data, proposal.data, { replaceUnreviewedConflicts: engine === "yolo" }),
+              mergeAiSlipProposal(records[matchIndex].data, proposal.data),
             );
             // Preserve a non-empty OCR value at the UI merge boundary. A
             // legacy candidate may contain an empty string that otherwise
@@ -843,7 +873,7 @@ export default function MasterEvidenceWorkspace() {
         }
         return { ...entry, embeddedSlips: records };
       });
-      await saveEvidenceQueueSnapshot(serializeEvidenceQueueSnapshot(nextQueue, manifestList));
+      await saveEvidenceQueueSnapshot(serializeEvidenceQueueSnapshot(prepareResearchQueueForPersistence(nextQueue), manifestList));
       setStagedQueue(nextQueue);
       recomputeConfirmedEvidence(nextQueue);
       setAiScanMessage(`${item.file.name}: เพิ่ม candidate รอตรวจ ${added} รายการ; เติมเฉพาะช่องว่างในรายการเดิม ${updated} รายการ`);
@@ -854,21 +884,9 @@ export default function MasterEvidenceWorkspace() {
     }
   };
 
-  // Use the local YOLO crop pipeline as a review-only fallback when a chat
-  // page was classified as containing a slip but local QR/OCR found no anchor.
-  // Gemini remains an explicit external-provider action.
-  useEffect(() => {
-    if (loading || aiScanItemId) return;
-    const target = stagedQueue.find((item) => item.status === "done"
-      && item.category === "CHAT"
-      && item.detectType === "TYPE_CHAT_WITH_SLIP"
-      && !item.stitchedIntoItemId
-      && !(item.embeddedSlips?.length)
-      && !autoYoloAttemptedRef.current.has(item.id));
-    if (!target) return;
-    autoYoloAttemptedRef.current.add(target.id);
-    void scanSelectedSlipWithAi(target.id, "yolo");
-  }, [aiScanItemId, loading, scanSelectedSlipWithAi, stagedQueue]);
+  // Do not run a detector automatically from chat classification. Detection
+  // is not certified for long-chat evidence; the reviewer must explicitly
+  // choose Gemini or provide a user-selected slip image/crop.
 
   const saveDuplicateReferenceResolution = (referenceNo: string, resolution: DuplicateReferenceResolution) => {
     setDuplicateReferenceResolutions((current) => ({ ...current, [referenceNo]: resolution }));
@@ -891,7 +909,39 @@ export default function MasterEvidenceWorkspace() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const autoYoloAttemptedRef = useRef<Set<string>>(new Set());
+  const [researchImportBusy, setResearchImportBusy] = useState(false);
+  const [researchImportMessage, setResearchImportMessage] = useState<string | null>(null);
+  const reviewCanvasSource = resolveReviewCanvasSource(stagedQueue[selectedItemIndex]);
+
+  const selectReviewArtifact = (artifactId: string) => {
+    const item = stagedQueue[selectedItemIndex];
+    if (!item) return;
+    const next = { ...item, selectedReviewArtifactId: artifactId };
+    setStagedQueue((queue) => queue.map((entry) => entry.id === item.id ? next : entry));
+    setPreviewImage(getReviewPreviewSource(next));
+  };
+
+  // Task 1–3 writers supply artifact.url as embedded raster data or a durable
+  // same-origin path. Validate the run against the original File, never the
+  // derived processingFile. This changes research review state only.
+  const importResearchRun = async (file: File) => {
+    const item = stagedQueue[selectedItemIndex];
+    if (!item || loading || researchImportBusy) return;
+    setResearchImportBusy(true);
+    setResearchImportMessage(null);
+    try {
+      const run = JSON.parse(await file.text()) as ResearchRunManifest;
+      const sourceSha = await computeFileSha256(item.file);
+      const next = attachResearchRun(item, run, sourceSha) as typeof item;
+      setStagedQueue((queue) => queue.map((entry) => entry.id === item.id
+        ? { ...entry, researchRun: next.researchRun, selectedReviewArtifactId: "original" } : entry));
+      setResearchImportMessage(`แนบผลวิจัย ${item.file.name} แล้ว · SHA-256 ตรงกับต้นฉบับ · review-only`);
+    } catch (error) {
+      setResearchImportMessage(`แนบผลวิจัยไม่สำเร็จ: ${error instanceof Error ? error.message : "manifest ไม่ถูกต้อง"}`);
+    } finally {
+      setResearchImportBusy(false);
+    }
+  };
 
   // Select an evidence item from the queue to view on canvas & inspection panels
   const selectEvidenceItem = (index: number, sliceIndex: number = 0) => {
@@ -899,7 +949,7 @@ export default function MasterEvidenceWorkspace() {
     setSelectedItemIndex(index);
     setSelectedSliceIndex(sliceIndex);
     const item = stagedQueue[index];
-    setPreviewImage(item.previewUrl);
+    setPreviewImage(getReviewPreviewSource(item));
     if (item.category !== "PENDING") setEvidenceMode(item.category);
     if (item.data) {
       setExtractedData(item.data);
@@ -1091,6 +1141,55 @@ export default function MasterEvidenceWorkspace() {
           : item.processingWarnings,
       };
     });
+
+    // Do not invoke the un-certified long-chat detector during the primary
+    // workflow. Research manifests can still be imported explicitly from the
+    // review panel, while the original file remains the evidence source.
+    currentQueue = currentQueue.map((item) => item.isDuplicate ? item : {
+      ...item,
+      researchRun: undefined,
+      selectedReviewArtifactId: "original",
+      processingWarnings: [...(item.processingWarnings || []), "ปิดการตรวจสลิปอัตโนมัติ; กรุณาเลือก/ครอปภาพสลิปเอง หรือกด Gemini เพื่อสกัดเป็นข้อเสนอรอตรวจ"],
+    });
+    setStagedQueue(currentQueue);
+
+    // Derived images are processing aids only. The original File and its
+    // SHA-256 remain the chain-of-custody source; QR/OCR may use the derived
+    // File when Upscayl succeeds, otherwise processing continues review-only.
+    currentQueue = await mapWithConcurrency(currentQueue, 1, async (item, index) => {
+      if (item.isDuplicate) return item;
+      setBatchProgress({ current: index + 1, total: currentQueue.length, currentFileName: item.file.name, phase: "สร้างภาพอนุพันธ์สำหรับ QR/OCR (ต้นฉบับไม่เปลี่ยน)" });
+      try {
+        const form = new FormData();
+        form.append("image", item.file, item.file.name);
+        form.append("scale", "2");
+        form.append("model", "upscayl-standard-4x");
+        const response = await fetch("/api/derived-image/upscayl", { method: "POST", body: form, cache: "no-store" });
+        const payload = await response.json().catch(() => null) as {
+          success?: boolean;
+          status?: string;
+          message?: string;
+          metadata?: Record<string, unknown> & { status?: string };
+          derivedImage?: string;
+        } | null;
+        if (!response.ok || !payload?.success || !payload.derivedImage || !payload.metadata) {
+          const selected = selectDerivedProcessingSource(item.file, { status: payload?.status || "unavailable", message: payload?.message || `Upscayl ตอบกลับ HTTP ${response.status}` });
+          return { ...item, processingFile: selected.file, processingWarnings: [...(item.processingWarnings || []), selected.warning].filter(Boolean) };
+        }
+        const derivedBlob = await (await fetch(payload.derivedImage)).blob();
+        const derivedFile = new File([derivedBlob], `${item.file.name}.derived.png`, { type: "image/png", lastModified: Date.now() });
+        const selected = selectDerivedProcessingSource(item.file, { status: "success", derivedFile, metadata: { ...payload.metadata, reviewOnly: true } });
+        return {
+          ...item,
+          processingFile: selected.file,
+          reviewPreviewUrl: payload.derivedImage,
+          enhancementArtifact: { ...payload.metadata, status: payload.metadata.status || "success", reviewOnly: true },
+          processingWarnings: [...(item.processingWarnings || []), "QR/OCR ใช้ภาพอนุพันธ์จาก Upscayl; ต้นฉบับและ SHA-256 ไม่เปลี่ยน"],
+        };
+      } catch (error) {
+        return { ...item, processingFile: item.file, processingWarnings: [...(item.processingWarnings || []), `สร้างภาพอนุพันธ์ไม่สำเร็จ; ใช้ต้นฉบับต่อและคงสถานะรอตรวจทาน (${error instanceof Error ? error.message : "unknown error"})`] };
+      }
+    });
     setStagedQueue(currentQueue);
     let updatedManifest = [...manifestList];
     currentQueue.filter((item) => item.isDuplicate).forEach((item) => {
@@ -1130,7 +1229,7 @@ export default function MasterEvidenceWorkspace() {
       const preflightByItem = chatIndices.length > 1
         ? await mapWithConcurrency(chatIndices, 2, async (itemIndex, orderIndex) => {
           const item = currentQueue[itemIndex];
-          return await readChatPreflight(item.file, orderIndex).catch(() => null);
+          return await readChatPreflight(item.processingFile || item.file, orderIndex).catch(() => null);
         })
         : [];
       const timestampedInputs = await Promise.all(chatIndices.map(async (itemIndex, index) => {
@@ -1138,10 +1237,10 @@ export default function MasterEvidenceWorkspace() {
         const preflight = preflightByItem[index] || null;
         return {
           id: item.id,
-          file: item.file,
+          file: item.processingFile || item.file,
           fileName: item.file.name,
           sha256: item.meta?.sha256 || "",
-          captureTime: await readImageCaptureTime(item.file),
+          captureTime: await readImageCaptureTime(item.processingFile || item.file),
           eventTime: preflight?.eventTime || null,
           ocrLines: preflight?.lines || [],
         };
@@ -1166,11 +1265,11 @@ export default function MasterEvidenceWorkspace() {
       for (const itemIndex of chatIndices) {
         const item = currentQueue[itemIndex];
         try {
-          const bitmap = await createImageBitmap(item.file);
+          const bitmap = await createImageBitmap(item.processingFile || item.file);
           const sourceScale = bitmap.width / 807;
           const normalizedHeight = Math.max(1, Math.round(bitmap.height / sourceScale));
           bitmap.close();
-          const slices = await sliceChatImageLocally(item.file);
+          const slices = await sliceChatImageLocally(item.processingFile || item.file);
           const sourceSegments = [{
             sourceItemId: item.id,
             sourceFileName: item.file.name,
@@ -1293,7 +1392,7 @@ export default function MasterEvidenceWorkspace() {
       kind: "SLIP" as const,
       itemId: currentQueue[itemIndex].id,
       fileName: currentQueue[itemIndex].file.name,
-      file: currentQueue[itemIndex].file,
+      file: currentQueue[itemIndex].processingFile || currentQueue[itemIndex].file,
     }));
     const qrJobs = [...slipQrJobs, ...chatSliceJobs];
     const qrJobPlan = buildUniquePixelJobPlan(qrJobs, pixelDuplicateGroups, (job) =>
@@ -1367,8 +1466,12 @@ export default function MasterEvidenceWorkspace() {
             },
           });
           return finalizeSlipCandidates(qrCandidates, ocrCandidates);
-        } catch {
+        } catch (error) {
           recordFailedPage(ocrFailedPagesByItem, job.itemId, job.kind === "CHAT" ? job.slice.sliceIndex : 1);
+          const message = error instanceof Error ? error.message : String(error);
+          const diagnostics = ocrRetryDiagnosticsByItem.get(job.itemId) || new Set<string>();
+          diagnostics.add(`OCR pipeline exception: ${message}`);
+          ocrRetryDiagnosticsByItem.set(job.itemId, diagnostics);
           return finalizeSlipCandidates(qrCandidates, []);
         } finally {
           ocrPagesCompleted += 1;
@@ -1473,8 +1576,8 @@ export default function MasterEvidenceWorkspace() {
       if (!slices.length || slices.some((_, sliceOffset) => (pageCandidates?.get(sliceOffset) || []).length > 0)) continue;
 
       try {
-        setBatchProgress({ current: itemIndex + 1, total: currentQueue.length, currentFileName: item.file.name, phase: "ตรวจ QR/OCR ซ้ำบนภาพต้นฉบับของแชทที่มีสลิป" });
-        const bitmap = await createImageBitmap(item.file);
+        setBatchProgress({ current: itemIndex + 1, total: currentQueue.length, currentFileName: item.file.name, phase: "ตรวจ QR/OCR ซ้ำบนภาพที่ปรับปรุงแล้วของแชทที่มีสลิป" });
+        const bitmap = await createImageBitmap(item.processingFile || item.file);
         const sourceCanvas = document.createElement("canvas");
         sourceCanvas.width = bitmap.width;
         sourceCanvas.height = bitmap.height;
@@ -1604,7 +1707,7 @@ export default function MasterEvidenceWorkspace() {
             if (candidates.length === 0 && !failedPages.has(slice.sliceIndex)) noCandidatePages.push(slice.sliceIndex);
             candidates.forEach((candidate) => pageCandidates.push({ sliceIndex: slice.sliceIndex - 1, candidate }));
           }
-          const bitmap = await createImageBitmap(targetItem.file);
+          const bitmap = await createImageBitmap(targetItem.processingFile || targetItem.file);
           const sourceWidth = bitmap.width;
           bitmap.close();
           const precedingPages = currentQueue.slice(0, targetIdx).reduce(
@@ -1766,7 +1869,7 @@ export default function MasterEvidenceWorkspace() {
         if (step === 0) {
           setExtractedData(isSlip ? slip : null);
           setMetadata(meta);
-          setPreviewImage(targetItem.previewUrl);
+          setPreviewImage(getReviewPreviewSource(targetItem));
           setEvidenceMode(isSlip ? "SLIP" : "CHAT");
           setSelectedItemIndex(targetIdx);
         }
@@ -1832,7 +1935,7 @@ export default function MasterEvidenceWorkspace() {
     setLoading(false);
     setCurrentStep(2);
     try {
-      await saveEvidenceQueueSnapshot(serializeEvidenceQueueSnapshot(currentQueue, updatedManifest));
+      await saveEvidenceQueueSnapshot(serializeEvidenceQueueSnapshot(prepareResearchQueueForPersistence(currentQueue), updatedManifest));
     } catch (error) {
       setErrorMsg(error instanceof Error ? `บันทึกผลประมวลผลในเครื่องไม่สำเร็จ: ${error.message}` : "บันทึกผลประมวลผลในเครื่องไม่สำเร็จ");
     }
@@ -1869,7 +1972,7 @@ export default function MasterEvidenceWorkspace() {
       if (nextIdx < 0) return;
       setSelectedItemIndex(nextIdx);
       setSelectedSliceIndex(0);
-      setPreviewImage(stagedQueue[nextIdx].previewUrl);
+      setPreviewImage(getReviewPreviewSource(stagedQueue[nextIdx]));
       if (stagedQueue[nextIdx].category !== "PENDING") setEvidenceMode(stagedQueue[nextIdx].category);
     }
   };
@@ -1883,7 +1986,7 @@ export default function MasterEvidenceWorkspace() {
       setSelectedItemIndex(prevIdx);
       const prevSlices = stagedQueue[prevIdx]?.chatSlices?.length ?? 1;
       setSelectedSliceIndex(prevSlices - 1);
-      setPreviewImage(stagedQueue[prevIdx].previewUrl);
+      setPreviewImage(getReviewPreviewSource(stagedQueue[prevIdx]));
       if (stagedQueue[prevIdx].category !== "PENDING") setEvidenceMode(stagedQueue[prevIdx].category);
     }
   };
@@ -2030,7 +2133,33 @@ export default function MasterEvidenceWorkspace() {
       ? activeItem.category === "CHAT"
       : evidenceMode === "CHAT";
 
-    if (activeItem && isChatMode && activeItem.chatSlices && activeItem.chatSlices.length > 0) {
+    const researchSource = resolveReviewCanvasSource(activeItem);
+    if (activeItem?.selectedReviewArtifactId && researchSource.url) {
+      const researchImage = new Image();
+      let cancelled = false;
+      researchImage.onload = () => {
+        if (cancelled) return;
+        const { chatBlockW, chatBlockH, chatTopX, chatTopY } = FORENSIC_CANVAS_SPEC;
+        const fit = fitImageToEvidenceBlock(researchImage.width, researchImage.height, {
+          x: chatTopX, y: chatTopY, width: chatBlockW, height: chatBlockH,
+        });
+        ctx.drawImage(researchImage, fit.x, fit.y, fit.width, fit.height);
+        if (researchSource.sourceKind === "detected-overlay") {
+          const dimensions = activeItem.researchRun!.source.dimensions;
+          ctx.save();
+          ctx.strokeStyle = "#d97706";
+          ctx.lineWidth = 3;
+          for (const detection of researchSource.detections) {
+            const rect = mapEvidenceBoundsToCanvas(detection.bbox, dimensions, fit);
+            if (rect) ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+          }
+          ctx.restore();
+        }
+        drawFooter();
+      };
+      researchImage.src = researchSource.url;
+      return () => { cancelled = true; researchImage.onload = null; };
+    } else if (activeItem && isChatMode && activeItem.chatSlices && activeItem.chatSlices.length > 0) {
       const activeSliceUrl = activeItem.chatSlices[selectedSliceIndex] || activeItem.chatSlices[0];
       const sliceImg = new Image();
       const renderSlice = () => {
@@ -2120,7 +2249,7 @@ export default function MasterEvidenceWorkspace() {
 
       ctx.textAlign = "left";
     }
-  }, [evidenceMode, previewImage, evidenceState, centerView, selectedItemIndex, selectedSliceIndex, selectedSlipRecordId, stagedQueue]);
+  }, [currentGlobalPage, currentTime, evidenceMode, pdpaEnabled, previewImage, evidenceState, centerView, selectedItemIndex, selectedSliceIndex, selectedSlipRecordId, stagedQueue, targetName, totalPages]);
 
   // Dynamic Cover Sheet Data calculation
   const coverSheetData: CourtCoverSheetData = useMemo(() => {
@@ -2166,7 +2295,7 @@ export default function MasterEvidenceWorkspace() {
         },
       },
     };
-  }, [caseNumber, evidenceState, targetName, pdpaEnabled]);
+  }, [caseNumber, evidenceState, mounted, targetName, pdpaEnabled]);
 
   // Step 2 Target Management Handlers
   const addTargetPerson = (raw: string, role = "ผู้รับโอน (Receiver)", amount = 0, count = 1) => {
@@ -3515,13 +3644,6 @@ export default function MasterEvidenceWorkspace() {
                             title="ส่งภาพนี้ผ่าน SlipVision ในเครื่องไป Gemini; ผลเป็น candidate รอตรวจ ไม่ยืนยันธุรกรรม"
                             className="rounded border border-emerald-400/40 px-1.5 py-1 text-[10px] text-emerald-200 disabled:opacity-40"
                           >SlipVision</button>
-                          <button
-                            type="button"
-                            onClick={(event) => { event.stopPropagation(); void scanSelectedSlipWithAi(item.id, "yolo"); }}
-                            disabled={aiScanItemId !== null || loading}
-                            title="หาและครอปกรอบสลิปด้วย YOLO ในเครื่อง; OCR/QR เป็นข้อเสนอรอตรวจทาน"
-                            className="rounded border border-amber-400/40 px-1.5 py-1 text-[10px] text-amber-200 disabled:opacity-40"
-                          >YOLO</button>
                         </div>
                       )}
 
@@ -3930,6 +4052,42 @@ export default function MasterEvidenceWorkspace() {
           <div className="flex-1 w-full flex items-center justify-center p-2 min-h-0 overflow-hidden">
             {centerView === "EVIDENCE_A4" && (
               <div className="flex flex-col items-center gap-2 h-full justify-center">
+                {stagedQueue[selectedItemIndex] && (
+                  <div className="w-full max-w-[720px] rounded border border-sky-400/30 bg-slate-950/90 p-2 text-[10px] text-sky-100" data-testid="research-run-controls">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label>
+                        ภาพสำหรับตรวจทาน
+                        <select aria-label="เลือกภาพวิจัยบน Canvas" className="ml-2 rounded border border-slate-600 bg-slate-900 p-1" value={stagedQueue[selectedItemIndex].selectedReviewArtifactId || "default"}
+                          onChange={(event) => selectReviewArtifact(event.target.value === "default" ? "" : event.target.value)}>
+                          <option value="default">ภาพรีวิวเดิม</option>
+                          <option value="original">ต้นฉบับ</option>
+                          {stagedQueue[selectedItemIndex].researchRun && <option value="detected-overlay">ต้นฉบับ + กรอบตรวจพบสลิป</option>}
+                          {getResearchArtifacts(stagedQueue[selectedItemIndex].researchRun).filter((artifact: ResearchArtifact) => artifact.artifactType !== "original_reference").map((artifact: ResearchArtifact) => (
+                            <option key={artifact.artifactPath} value={artifact.artifactPath} disabled={!artifact.url}>
+                              Stream {artifact.stream} · {artifact.artifactPath.replace(/^derived\/stream-[ab]\//, "")}{!artifact.url ? " · ไม่มีภาพแนบ" : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="cursor-pointer rounded border border-sky-400/40 px-2 py-1">
+                        {researchImportBusy ? "กำลังตรวจ manifest…" : "เปิดผลวิจัย A/B (JSON)"}
+                        <input aria-label="เปิดผลวิจัย A/B" type="file" accept="application/json,.json" className="sr-only" disabled={loading || researchImportBusy}
+                          onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void importResearchRun(file); }} />
+                      </label>
+                    </div>
+                    <div data-testid="research-canvas-label">{formatReviewCanvasLabel(reviewCanvasSource)}</div>
+                    <div className="break-all font-mono">Source SHA-256: {reviewCanvasSource.sourceSha256 || "ยังไม่ล็อก source"}</div>
+                    {stagedQueue[selectedItemIndex].researchRun && (
+                      <div>ตรวจพบ {stagedQueue[selectedItemIndex].researchRun!.detectionResult.detectedCount}/{stagedQueue[selectedItemIndex].researchRun!.expectedSlipCount} จุด · {stagedQueue[selectedItemIndex].researchRun!.detectionResult.pass ? "ผ่านเฉพาะขั้นตรวจจับ" : "ไม่ผ่านขั้นตรวจจับ"} · Extraction: {stagedQueue[selectedItemIndex].researchRun!.extractionResult.status}</div>
+                    )}
+                    {researchImportMessage && <div role="status">{researchImportMessage}</div>}
+                  </div>
+                )}
+                {reviewCanvasSource.sourceKind === "derived" && (
+                  <div data-testid="review-derived-preview" className="rounded border border-fuchsia-300/40 bg-fuchsia-950/40 px-3 py-1 text-[10px] text-fuchsia-100">
+                    ภาพอนุพันธ์ {reviewCanvasSource.stream ? `Stream ${reviewCanvasSource.stream} · ${reviewCanvasSource.variant}` : "Upscayl"} สำหรับช่วยดู/อ่าน · ต้นฉบับยังเก็บแยกเป็นหลักฐาน
+                  </div>
+                )}
                 <canvas
                   ref={canvasRef}
                   className="max-h-[calc(100%-36px)] max-w-full rounded shadow-2xl"

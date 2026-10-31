@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev --webpack",
-    "build": "next build",
+    "build": "next build --webpack",
     "build:enterprise": "node scripts/build-enterprise.mjs",
     "start": "node scripts/start-enterprise.mjs",
     "start:supervised": "node scripts/enterprise-supervisor.mjs",
