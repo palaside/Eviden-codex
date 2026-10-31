@@ -120,6 +120,31 @@ export async function extractSlipsLocally(
     if (!ctx) return [];
 
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    // QR detection is synchronous and runs several decoder/fallback passes.
+    // Bound the scan workload for camera/PDF-sized slips, then map accepted
+    // coordinates back to the original canvas so evidence crops remain exact.
+    const maxQrScanDimension = 2200;
+    const scanScale = Math.min(1, maxQrScanDimension / Math.max(canvas.width, canvas.height));
+    if (scanScale < 1) {
+      const scanCanvas = document.createElement("canvas");
+      scanCanvas.width = Math.max(1, Math.round(canvas.width * scanScale));
+      scanCanvas.height = Math.max(1, Math.round(canvas.height * scanScale));
+      scanCanvas.getContext("2d")?.drawImage(canvas, 0, 0, scanCanvas.width, scanCanvas.height);
+      const scaledCandidates = await extractSlipsLocally(scanCanvas, options);
+      return scaledCandidates.map((candidate) => {
+        const bounds = {
+          x: Math.round(candidate.bounds.x / scanScale),
+          y: Math.round(candidate.bounds.y / scanScale),
+          width: Math.max(1, Math.round(candidate.bounds.width / scanScale)),
+          height: Math.max(1, Math.round(candidate.bounds.height / scanScale)),
+        };
+        const crop = document.createElement("canvas");
+        crop.width = Math.min(canvas.width - bounds.x, Math.max(1, bounds.width * 7));
+        crop.height = Math.min(canvas.height - bounds.y, Math.max(1, bounds.height * 7));
+        crop.getContext("2d")?.drawImage(canvas, bounds.x, bounds.y, crop.width, crop.height, 0, 0, crop.width, crop.height);
+        return { ...candidate, bounds, cropDataUrl: crop.toDataURL("image/png") };
+      });
+    }
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const candidates: LocalSlipCandidate[] = [];
     const scanData = new Uint8ClampedArray(imageData.data);

@@ -22,19 +22,23 @@ const cases = [
     expected: { amount: "฿26,400.00", recipient: "จิณห์นิภา ประสาทเขตรการ" },
   },
 ];
+const requestedCaseIds = (process.env.E2E_CASE_IDS || "").split(",").map((id) => id.trim()).filter(Boolean);
+const selectedCases = requestedCaseIds.length ? cases.filter((testCase) => requestedCaseIds.includes(testCase.id)) : cases;
 
 await fs.mkdir(outDir, { recursive: true });
 const browser = await chromium.launch({ headless: true, executablePath: process.env.E2E_BROWSER_EXECUTABLE || undefined });
 const report = { baseUrl, generatedAt: new Date().toISOString(), cases: [], passed: false };
 
 try {
-  for (const testCase of cases) {
+  for (const testCase of selectedCases) {
     const context = await browser.newContext({ viewport: { width: 1662, height: 1548 } });
     const page = await context.newPage();
     const result = { id: testCase.id, fixture: testCase.fixture, expected: testCase.expected, steps: [] };
     try {
       await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
       await page.getByText("PURE ZERO STATE", { exact: true }).waitFor({ state: "visible", timeout: 60_000 });
+      await page.locator("#evidence-file-input").waitFor({ state: "attached", timeout: 60_000 });
+      await page.waitForTimeout(500);
       await page.locator("#evidence-file-input").setInputFiles(testCase.fixture);
       await page.getByText(path.basename(testCase.fixture), { exact: true }).waitFor({ state: "visible", timeout: 60_000 });
       await page.getByRole("button", { name: /เริ่มประมวลผลพยานหลักฐาน/ }).click();
@@ -56,11 +60,12 @@ try {
       await page.screenshot({ path: path.join(outDir, `${testCase.id}-error.png`), fullPage: true }).catch(() => {});
     } finally {
       report.cases.push(result);
+      await fs.writeFile(path.join(outDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
       await page.close();
       await context.close();
     }
   }
-  report.passed = report.cases.length === cases.length && report.cases.every((item) => item.passed);
+  report.passed = report.cases.length === selectedCases.length && selectedCases.length > 0 && report.cases.every((item) => item.passed);
 } finally {
   await fs.writeFile(path.join(outDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
   await browser.close();

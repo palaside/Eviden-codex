@@ -3,6 +3,8 @@ import crypto from "crypto";
 import { z } from "zod";
 import { SlipExtractionSchema, type SlipExtraction } from "@/schemas/slip.schema";
 import { classifyExternalProviderStatus } from "@/utils/external-provider-status.mjs";
+import { selectSlipTemplate } from "@/utils/slip-template-registry.mjs";
+import { buildGeminiFieldBundlePayload } from "@/utils/gemini-field-bundle.mjs";
 
 const SlipDetectionSchema = z.object({
   slips: z.array(z.object({
@@ -10,6 +12,17 @@ const SlipDetectionSchema = z.object({
     visual_cues: z.array(z.string()).min(1),
     data: SlipExtractionSchema,
   })).max(20),
+});
+
+const FieldBundleSchema = z.object({
+  fields: z.record(z.string(), z.object({
+    value: z.union([z.string(), z.number(), z.null()]),
+    raw_text: z.union([z.string(), z.null()]),
+    confidence: z.number().min(0).max(1),
+    source_field: z.string(),
+  })),
+  warnings: z.array(z.string()).default([]),
+  review_status: z.literal("review_required"),
 });
 
 const SLIP_DETECTION_PROMPT = `ตรวจภาพนี้เพื่อหาสลิปโอนเงินธนาคารที่มองเห็นจริง โดยเฉพาะภาพแชทที่อาจมีสลิปแทรกอยู่
@@ -26,6 +39,7 @@ const SLIP_EXTRACTION_SYSTEM_PROMPT = `คุณเป็นระบบสก�
 หน้าที่ของคุณคืออ่านข้อความจากภาพสลิปที่ได้รับ และแปลงข้อมูลที่ปรากฏจริงในภาพให้อยู่ในรูปแบบ JSON ตาม schema ที่กำหนด
 
 กฎสำคัญ:
+0. เริ่มจากกำหนดโครงสร้างเอกสารและธนาคารจากองค์ประกอบที่มองเห็น แล้วอ่านเฉพาะ field ที่อยู่ในโครงสร้างนั้น; ห้ามใช้ข้อความนอกบริเวณสลิปเป็นค่า field
 1. อ่านเฉพาะข้อมูลที่มองเห็นจริงจากภาพ ห้ามคาดเดา ห้ามเติมข้อมูลที่ไม่มีในภาพ
 2. หากอ่านค่าใดไม่ชัดเจน หรือไม่มีข้อมูล ให้ใส่ค่า null
 3. ห้ามแก้ไขชื่อบุคคลโดยการคาดเดา แม้จะคิดว่าสะกดผิด
@@ -90,6 +104,7 @@ export async function POST(request: Request) {
     let mimeType = "image/png";
     let fileName = "slip_evidence.png";
     let detectSlips = false;
+    let fieldBundle: { slipId: string; fields: Array<{ field: string; cropDataUrl: string }> } | null = null;
 
     if (contentType.includes("multipart/form-data")) {
       const formData = await request.formData();
@@ -114,23 +129,30 @@ export async function POST(request: Request) {
         mimeType?: string;
         fileName?: string;
         mode?: string;
+        slipId?: string;
+        fields?: Array<{ field: string; cropDataUrl: string }>;
       };
 
-      if (!jsonBody.image) {
+      if (jsonBody.mode === "field_bundle") {
+        if (!jsonBody.slipId || !Array.isArray(jsonBody.fields)) {
+          return NextResponse.json({ success: false, message: "field_bundle ต้องมี slipId และ fields" }, { status: 400 });
+        }
+        fieldBundle = { slipId: jsonBody.slipId, fields: jsonBody.fields };
+      } else if (!jsonBody.image) {
         return NextResponse.json(
           { success: false, message: "ไม่พบข้อมูลภาพ base64 ในคำขอ" },
           { status: 400 }
         );
       }
 
-      base64Image = jsonBody.image.replace(/^data:image\/[a-z]+;base64,/, "");
+      if (jsonBody.image) base64Image = jsonBody.image.replace(/^data:image\/[a-z]+;base64,/, "");
       mimeType = jsonBody.mimeType || "image/png";
       if (jsonBody.fileName) fileName = jsonBody.fileName;
       detectSlips = jsonBody.mode === "detect";
     }
 
     // Forensic Checksum: SHA-256 calculation
-    const imageBuffer = Buffer.from(base64Image, "base64");
+    const imageBuffer = Buffer.from(base64Image || "", "base64");
     const sha256 = crypto.createHash("sha256").update(imageBuffer).digest("hex");
 
     // Call Vision AI Engine (Gemini 2.5 Flash via REST API)
@@ -145,27 +167,18 @@ export async function POST(request: Request) {
       );
     }
 
-    const aiEndpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+    const aiEndpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
 
-    const aiPayload = {
-      contents: [
-        {
-          parts: [
-            { text: detectSlips ? SLIP_DETECTION_PROMPT.replace("__SCHEMA__", SLIP_EXTRACTION_SYSTEM_PROMPT) : SLIP_EXTRACTION_SYSTEM_PROMPT },
-            {
-              inline_data: {
-                mime_type: mimeType,
-                data: base64Image,
-              },
-            },
-          ],
-        },
-      ],
-      generationConfig: {
-        response_mime_type: "application/json",
-        temperature: 0.1,
-      },
-    };
+    const aiPayload = fieldBundle
+      ? buildGeminiFieldBundlePayload(fieldBundle)
+      : {
+        contents: [{ parts: [
+          { text: detectSlips ? SLIP_DETECTION_PROMPT.replace("__SCHEMA__", SLIP_EXTRACTION_SYSTEM_PROMPT) : SLIP_EXTRACTION_SYSTEM_PROMPT },
+          { inline_data: { mime_type: mimeType, data: base64Image } },
+        ] }],
+        generationConfig: { response_mime_type: "application/json", temperature: 0.1 },
+      };
 
     const aiResponse = await fetch(aiEndpoint, {
       method: "POST",
@@ -225,7 +238,9 @@ export async function POST(request: Request) {
     }
 
     // Zod Validation Gatekeeper
-    const validation = detectSlips ? SlipDetectionSchema.safeParse(parsedJson) : SlipExtractionSchema.safeParse(parsedJson);
+    const validation = fieldBundle
+      ? FieldBundleSchema.safeParse(parsedJson)
+      : detectSlips ? SlipDetectionSchema.safeParse(parsedJson) : SlipExtractionSchema.safeParse(parsedJson);
 
     if (!validation.success) {
       return NextResponse.json(
@@ -239,12 +254,35 @@ export async function POST(request: Request) {
       );
     }
 
+    if (fieldBundle) {
+      return NextResponse.json({
+        success: true,
+        mode: "field_bundle",
+        provider: "Gemini",
+        model,
+        data: FieldBundleSchema.parse(parsedJson),
+        metadata: { file_name: fileName, mime_type: mimeType, extracted_at: new Date().toISOString(), template_mode: "review_only" },
+      });
+    }
+
+    const templateIds: Array<string | null> = detectSlips
+      ? SlipDetectionSchema.parse(parsedJson).slips.map((candidate) => selectSlipTemplate({
+        bankName: candidate.data.bank.name,
+        rawText: candidate.data.raw_text,
+      })?.id || null)
+      : [selectSlipTemplate({
+        bankName: SlipExtractionSchema.parse(parsedJson).bank.name,
+        rawText: SlipExtractionSchema.parse(parsedJson).raw_text,
+      })?.id || null];
     const metadata = {
       file_name: fileName,
       mime_type: mimeType,
       sha256,
       size_bytes: imageBuffer.length,
       extracted_at: new Date().toISOString(),
+      template_ids: templateIds,
+      template_mode: "review_only",
+      model,
     };
     if (detectSlips) {
       const detections = SlipDetectionSchema.parse(parsedJson);

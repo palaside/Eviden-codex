@@ -38,6 +38,27 @@ import { extractSlipCandidatesWithLocalOcr, getCachedChatEvidenceLayers, readCha
 import { explainSlipOcrRegionRejection } from "@/utils/slip-ocr-trace.mjs";
 import { finalizeSlipCandidates } from "@/utils/finalize-slip-candidates.mjs";
 import { buildSlipExtractionStatus, buildSlipQrWarning } from "@/utils/slip-extraction-status.mjs";
+import { selectSlipTemplate } from "@/utils/slip-template-registry.mjs";
+import { buildTemplateFieldPlan } from "@/utils/template-field-crops.mjs";
+import { mergeGeminiFieldBundle } from "@/utils/gemini-field-bundle.mjs";
+import { fetchWithTimeout } from "@/utils/fetch-with-timeout.mjs";
+
+const QR_OCR_JOB_TIMEOUT_MS = 120_000;
+const DERIVED_IMAGE_REQUEST_TIMEOUT_MS = 45_000;
+
+async function withQrOcrTimeout<T>(operation: Promise<T>, label: string, timeoutMs = QR_OCR_JOB_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} ใช้เวลานานเกิน ${Math.round(timeoutMs / 1000)} วินาที`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 import { dedupeEmbeddedSlipDetections } from "@/utils/dedupe-embedded-slip-detections.mjs";
 import { buildNamedCaseOutputPlans, groupImageBatchByPrefix, prepareImageBatch } from "@/utils/prepare-image-batch.mjs";
 import { fitImageToEvidenceBlock } from "@/utils/fit-image-to-evidence-block.mjs";
@@ -77,6 +98,7 @@ import { classifyUniqueEvidenceItems } from "@/utils/evidence-detection-pipeline
 import { matchLegalSignalsInText, getLegalSignalDictionaryMetadata } from "@/utils/legal-signal-matcher.mjs";
 import { selectDerivedProcessingSource } from "@/utils/derived-processing-source.mjs";
 import { attachResearchRun, formatReviewCanvasLabel, getResearchArtifacts, getReviewPreviewSource, prepareResearchQueueForPersistence, resolveReviewCanvasSource } from "@/utils/review-preview-source.mjs";
+import { shouldRenderChatSlices } from "@/utils/review-canvas-render-mode.mjs";
 import { createArtifactRecord, createResearchRunManifest } from "@/utils/dual-stream-enhancement.mjs";
 
 type ResearchArtifact = ReturnType<typeof createArtifactRecord> & { variant?: string; url?: string };
@@ -94,6 +116,8 @@ interface ExtractionMetadata {
   sha256: string;
   size_bytes: number;
   extracted_at: string;
+  template_ids?: Array<string | null>;
+  template_mode?: "review_only";
 }
 
 type CenterViewMode = "EVIDENCE_A4" | "COVER_PAGE" | "HASH_MANIFEST" | "EXECUTIVE_SUMMARY";
@@ -782,12 +806,60 @@ export default function MasterEvidenceWorkspace() {
         const context = crop.getContext("2d");
         if (!context) return [];
         context.drawImage(bitmap, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, bounds.width, bounds.height);
-        return [{ bounds, cropDataUrl: crop.toDataURL("image/png"), data: {
+        const template = selectSlipTemplate({ bankName: candidate.data.bank.name, rawText: candidate.data.raw_text });
+        const fieldPlan = buildTemplateFieldPlan(template, { width: crop.width, height: crop.height });
+        const fieldCrops = Object.values(fieldPlan).map((field) => {
+          const fieldCanvas = document.createElement("canvas");
+          fieldCanvas.width = field.bounds.width;
+          fieldCanvas.height = field.bounds.height;
+          fieldCanvas.getContext("2d")?.drawImage(crop, field.bounds.x, field.bounds.y, field.bounds.width, field.bounds.height, 0, 0, field.bounds.width, field.bounds.height);
+          return {
+            field: field.field,
+            source: "template_region_only" as const,
+            bounds: { x: bounds.x + field.bounds.x, y: bounds.y + field.bounds.y, width: field.bounds.width, height: field.bounds.height },
+            cropDataUrl: fieldCanvas.toDataURL("image/png"),
+            status: "review" as const,
+          };
+        });
+        return [{ bounds, cropDataUrl: crop.toDataURL("image/png"), templateId: template?.id || null, fieldCrops, data: {
           ...candidate.data,
           warnings: [...candidate.data.warnings, `${engineLabel} ตรวจพบกรอบสลิปจากภาพต้นฉบับ; หลักฐานภาพและ ${candidate.visual_cues.join(" / ")}; รอตรวจทาน`],
         } }];
       });
       bitmap.close();
+      // One provider request per detected slip: all template field crops travel
+      // together, so quota pressure is bounded and field provenance stays grouped.
+      for (let proposalIndex = 0; proposalIndex < proposals.length; proposalIndex += 1) {
+        const proposal = proposals[proposalIndex];
+        if (!proposal.fieldCrops?.length || engine !== "gemini") continue;
+        try {
+          const fieldResponse = await fetch("/api/slips/extract", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+            body: JSON.stringify({
+              mode: "field_bundle",
+              slipId: `${item.id}-slip-${proposalIndex + 1}`,
+              fields: proposal.fieldCrops.map((field) => ({ field: field.field, cropDataUrl: field.cropDataUrl })),
+            }),
+          });
+          const fieldResult = await fieldResponse.json() as { success?: boolean; data?: unknown; message?: string };
+          if (!fieldResponse.ok || !fieldResult.success || !fieldResult.data) {
+            throw new Error(fieldResult.message || `Field bundle API ตอบกลับ ${fieldResponse.status}`);
+          }
+          proposals[proposalIndex] = {
+            ...proposal,
+            data: mergeGeminiFieldBundle(proposal.data, fieldResult.data),
+          };
+        } catch (fieldError) {
+          proposals[proposalIndex] = {
+            ...proposal,
+            data: {
+              ...proposal.data,
+              warnings: [...proposal.data.warnings, `GEMINI_FIELD_BUNDLE_REVIEW_REQUIRED: ${fieldError instanceof Error ? fieldError.message : "provider error"}`],
+            },
+          };
+        }
+      }
       if (result.candidates.length > 0 && proposals.length !== result.candidates.length) {
         throw new Error("พิกัดกรอบที่ Gemini ส่งกลับไม่ถูกต้อง; ไม่บันทึกผลบางส่วน");
       }
@@ -809,7 +881,7 @@ export default function MasterEvidenceWorkspace() {
           return {
             ...entry, status: "done" as const, error: undefined, meta: entry.meta || result.metadata,
             data: entry.data ? mergeAiSlipProposal(entry.data, proposal.data) as SlipExtraction : proposal.data,
-            sourceBounds: proposal.bounds, cropDataUrl: proposal.cropDataUrl, isConfirmed: false,
+            sourceBounds: proposal.bounds, cropDataUrl: proposal.cropDataUrl, templateId: proposal.templateId, fieldCrops: proposal.fieldCrops, isConfirmed: false,
             aiProposedFields: entry.data
               ? [...new Set([...(entry.aiProposedFields || []), ...getAiFilledFields(entry.data, proposal.data)])]
               : ["all"],
@@ -843,7 +915,7 @@ export default function MasterEvidenceWorkspace() {
             }
             records[matchIndex] = {
               ...records[matchIndex], data: mergedData,
-              sourceBounds: proposal.bounds, cropDataUrl: proposal.cropDataUrl,
+              sourceBounds: proposal.bounds, cropDataUrl: proposal.cropDataUrl, templateId: proposal.templateId, fieldCrops: proposal.fieldCrops,
               isConfirmed: false, needsReview: true,
               aiProposedFields: [...new Set([...(match.aiProposedFields || []), ...getAiFilledFields(match.data, proposal.data)])],
             };
@@ -863,7 +935,7 @@ export default function MasterEvidenceWorkspace() {
             sourceSha256: result.metadata!.sha256,
             sourceReferences: [{ sourceItemId: entry.id, fileName: entry.file.name, sha256: result.metadata!.sha256, bounds: proposal.bounds }],
             data: proposal.data, sourceBounds: proposal.bounds, candidateBounds: mapped.candidate.bounds,
-            cropDataUrl: proposal.cropDataUrl,
+            cropDataUrl: proposal.cropDataUrl, templateId: proposal.templateId, fieldCrops: proposal.fieldCrops,
             chatPageNumber: mapped.streamPageNumber, chatPageCount: slices.length,
             dossierPageNumber: 4 + pagesBefore + mapped.sliceIndex,
             isDuplicate: false, isConfirmed: false, needsReview: true,
@@ -1164,7 +1236,7 @@ export default function MasterEvidenceWorkspace() {
         form.append("image", item.file, item.file.name);
         form.append("scale", "2");
         form.append("model", "upscayl-standard-4x");
-        const response = await fetch("/api/derived-image/upscayl", { method: "POST", body: form, cache: "no-store" });
+        const response = await fetchWithTimeout("/api/derived-image/upscayl", { method: "POST", body: form, cache: "no-store" }, { timeoutMs: DERIVED_IMAGE_REQUEST_TIMEOUT_MS });
         const payload = await response.json().catch(() => null) as {
           success?: boolean;
           status?: string;
@@ -1414,7 +1486,7 @@ export default function MasterEvidenceWorkspace() {
       2,
       async (job) => {
         try {
-          return await extractSlipsLocally(job.kind === "CHAT" ? job.slice.canvas : job.file, {
+          return await withQrOcrTimeout(extractSlipsLocally(job.kind === "CHAT" ? job.slice.canvas : job.file, {
             diagnosticProbeRegion: job.kind === "CHAT" && job.slice.streamPageNumber === 11
               ? { x: 370, y: 560, width: 140, height: 140 }
               : undefined,
@@ -1427,7 +1499,7 @@ export default function MasterEvidenceWorkspace() {
               job.itemId,
               job.kind === "CHAT" ? job.slice.sliceIndex : 1,
             ),
-          });
+          }), "QR scan");
         } catch {
           recordFailedPage(qrFailedPagesByItem, job.itemId, job.kind === "CHAT" ? job.slice.sliceIndex : 1);
           return [];
@@ -1457,14 +1529,14 @@ export default function MasterEvidenceWorkspace() {
             bitmap.close();
             workerSlot = pageIndex;
           }
-          const ocrCandidates = await extractSlipCandidatesWithLocalOcr(sourceCanvas, qrCandidates, workerSlot, {
+          const ocrCandidates = await withQrOcrTimeout(extractSlipCandidatesWithLocalOcr(sourceCanvas, qrCandidates, workerSlot, {
             jobKind: job.kind,
             onRetryDiagnostic: (message) => {
               const diagnostics = ocrRetryDiagnosticsByItem.get(job.itemId) || new Set<string>();
               diagnostics.add(message);
               ocrRetryDiagnosticsByItem.set(job.itemId, diagnostics);
             },
-          });
+          }), "OCR");
           return finalizeSlipCandidates(qrCandidates, ocrCandidates);
         } catch (error) {
           recordFailedPage(ocrFailedPagesByItem, job.itemId, job.kind === "CHAT" ? job.slice.sliceIndex : 1);
@@ -2134,7 +2206,7 @@ export default function MasterEvidenceWorkspace() {
       : evidenceMode === "CHAT";
 
     const researchSource = resolveReviewCanvasSource(activeItem);
-    if (activeItem?.selectedReviewArtifactId && researchSource.url) {
+    if (activeItem?.selectedReviewArtifactId && researchSource.url && !shouldRenderChatSlices({ isChatMode, sourceKind: researchSource.sourceKind })) {
       const researchImage = new Image();
       let cancelled = false;
       researchImage.onload = () => {

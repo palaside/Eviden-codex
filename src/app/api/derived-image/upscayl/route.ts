@@ -30,7 +30,13 @@ export async function POST(request: Request) {
     const sourcePath = path.join(tempDir, "source");
     const outputPath = path.join(tempDir, "derived.png");
     await fs.writeFile(sourcePath, new Uint8Array(await file.arrayBuffer()), { flag: "wx" });
-    const result = await createUpscaledDerivedImage({ sourcePath, outputPath, scale: scaleValue, model });
+    const result = await createUpscaledDerivedImage({
+      sourcePath,
+      outputPath,
+      scale: scaleValue,
+      model,
+      timeoutMs: Number(process.env.UPSCAYL_TIMEOUT_MS || 45_000),
+    });
     if (result.status !== "success") {
       return NextResponse.json({ success: false, ...result, message: "Upscayl ยังไม่พร้อม; คงผลเป็น review-only และไม่แก้ต้นฉบับ" }, { status: 200 });
     }

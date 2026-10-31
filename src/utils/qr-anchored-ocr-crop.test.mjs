@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getQrAnchoredOcrCrop, getRecipientRetryCropBounds } from "./qr-anchored-ocr-crop.ts";
+import { getQrAnchoredOcrCrop, getRecipientRetryCropBounds, getSoloSlipOcrCrop } from "./qr-anchored-ocr-crop.ts";
 import { findRecipientName, findSlipOcrRegions } from "./slip-ocr-analysis.ts";
 
 test("QR crop stays within the page and contains the QR anchor", () => {
@@ -14,6 +14,21 @@ test("QR crop stays within the page and contains the QR anchor", () => {
   assert.ok(qr.x + qr.width / 2 >= crop.x && qr.x + qr.width / 2 <= crop.x + crop.width);
   assert.ok(qr.y + qr.height / 2 >= crop.y && qr.y + qr.height / 2 <= crop.y + crop.height);
   assert.ok(crop.width * crop.height < image.width * image.height);
+});
+
+test("solo-slip crop keeps a small centered slip readable instead of scaling the page margins", () => {
+  const crop = getSoloSlipOcrCrop(
+    { width: 4960, height: 7014 },
+    { x: 2991, y: 4199, width: 185, height: 185 },
+  );
+
+  assert.ok(crop.x >= 0 && crop.y >= 0);
+  assert.ok(crop.x + crop.width <= 4960);
+  assert.ok(crop.y + crop.height <= 7014);
+  assert.ok(crop.width < 3000);
+  assert.ok(crop.height < 5000);
+  assert.ok(crop.x + crop.width / 2 > 1500);
+  assert.ok(crop.y + crop.height / 2 > 2500);
 });
 
 test("recipient name on the line after the recipient label is extracted", () => {

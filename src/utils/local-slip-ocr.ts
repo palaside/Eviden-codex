@@ -2,7 +2,7 @@ import { createWorker, PSM } from "tesseract.js";
 import type { LocalSlipCandidate } from "@/utils/local-qr-extractor";
 import { findRecipientName, findRecipientNameWithLine, findSenderName, findSlipOcrRegions, toSlipExtraction } from "@/utils/slip-ocr-analysis";
 import { filterTextOnlySlipRegionsForJob } from "@/utils/ocr-analysis-policy.mjs";
-import { getQrAnchoredOcrCrop, getRecipientRetryCropBounds, type PixelBounds } from "@/utils/qr-anchored-ocr-crop";
+import { getQrAnchoredOcrCrop, getRecipientRetryCropBounds, getSoloSlipOcrCrop, type PixelBounds } from "@/utils/qr-anchored-ocr-crop";
 import { enhanceOcrPixels, getOcrEnhancementScale } from "@/utils/enhance-for-ocr.mjs";
 import { segmentOcrTextLines } from "@/utils/two-layer-segmentation.mjs";
 import { createColorSeparatedOcrCanvas, createMorphologicalSlipOcrCanvas, detectChatVisualRegions, findQrSlipObjectBounds } from "@/utils/chat-visual-contours.mjs";
@@ -224,11 +224,15 @@ export async function extractSlipCandidatesWithLocalOcr(
 
     // A detected QR is a local anchor for the slip, so avoid recognizing the entire chat page first.
     for (const qrCandidate of qrCandidates) {
-      const objectBounds = findQrSlipObjectBounds(contourCandidates, qrCandidate.bounds, {
-        width: canvas.width,
-        height: canvas.height,
-      });
-      const fallbackBounds = getQrAnchoredOcrCrop({ width: canvas.width, height: canvas.height }, qrCandidate.bounds);
+      const objectBounds = options.jobKind === "CHAT"
+        ? findQrSlipObjectBounds(contourCandidates, qrCandidate.bounds, {
+            width: canvas.width,
+            height: canvas.height,
+          })
+        : null;
+      const fallbackBounds = options.jobKind === "SLIP"
+        ? getSoloSlipOcrCrop({ width: canvas.width, height: canvas.height }, qrCandidate.bounds)
+        : getQrAnchoredOcrCrop({ width: canvas.width, height: canvas.height }, qrCandidate.bounds);
       const paddingX = objectBounds ? Math.round(objectBounds.width * 0.015) : 0;
       const paddingY = objectBounds ? Math.round(objectBounds.height * 0.015) : 0;
       const cropBounds = objectBounds ? {
@@ -466,9 +470,17 @@ export async function extractSlipCandidatesWithLocalOcr(
       }
     }
 
-    // Always OCR the entire page as well: other slips may exist outside detected QR crops.
+    // A QR-anchored standalone slip already has a bounded OCR pass above.
+    // Do not run a second full-page OCR over a multi-megapixel A4 canvas;
+    // that pass can monopolize the browser worker and leave the UI at 100%.
+    let lines: ReturnType<typeof getOcrLines> = [];
+    if (options.jobKind === "SLIP" && qrCandidates.length > 0) {
+      lines = [];
+    } else {
+    // For chat pages, keep the full-page pass because it may contain slips
+    // outside the QR crop and it is part of the evidence-layer trace.
     const { data: originalData } = await worker.recognize(canvas, {}, { blocks: true });
-    let lines = getOcrLines(originalData);
+    lines = getOcrLines(originalData);
     diagnosticAttempts.push(buildOcrAttemptTrace({
       id: "full-page-original", scope: "full_page", trigger: "initial",
       sourceBounds: { x: 0, y: 0, width: canvas.width, height: canvas.height },
@@ -525,6 +537,7 @@ export async function extractSlipCandidatesWithLocalOcr(
       if (decision.accepted) {
         lines = enhancedLines;
       }
+    }
     }
     let visualCandidates: Awaited<ReturnType<typeof detectChatVisualRegions>>["regions"] = [];
     let contourAudit: Awaited<ReturnType<typeof detectChatVisualRegions>>["contourAudit"] | null = null;

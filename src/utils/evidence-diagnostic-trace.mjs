@@ -71,6 +71,7 @@ export function buildEvidenceDiagnosticTrace(stagedQueue, manifestList, generate
       extractionVersion: item.extractionVersion ?? null,
       error: item.error || null,
       warnings: item.processingWarnings || [],
+      enhancementArtifact: item.enhancementArtifact || null,
       qrScanDiagnostics: qrScans,
       ocrDiagnosticTrace: stripMaskPreview(item.ocrDiagnosticTrace),
       chatPages: (item.chatEvidenceLayers || []).map((page) => ({

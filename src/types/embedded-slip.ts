@@ -53,6 +53,14 @@ export interface EmbeddedSlipRecord {
   duplicateOfRef?: string;
   needsReview: boolean;
   aiProposedFields?: string[];
+  templateId?: string | null;
+  fieldCrops?: Array<{
+    field: string;
+    source: "template_region_only";
+    bounds: { x: number; y: number; width: number; height: number };
+    cropDataUrl: string;
+    status: "review";
+  }>;
 }
 
 export interface ChatEvidenceLayerPage {

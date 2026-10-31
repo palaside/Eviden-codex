@@ -57,7 +57,7 @@ export async function createUpscaledDerivedImage({
   modelDir = null,
   env = process.env,
   execFileImpl = execFile,
-  timeoutMs = 120_000,
+  timeoutMs = 600_000,
 }) {
   if (!sourcePath || !outputPath) throw new TypeError("sourcePath and outputPath are required");
   if (!ALLOWED_SCALES.has(scale)) throw new RangeError("Upscayl scale must be 2 or 4");
