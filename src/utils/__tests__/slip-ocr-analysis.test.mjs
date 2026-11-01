@@ -10,6 +10,12 @@ const line = (text, y, confidence = 90) => ({
   bbox: { x0: 100, y0: y, x1: 500, y1: y + 24 },
 });
 
+const boundedLine = (text, x0, y0, x1, y1, confidence = 90) => ({
+  text,
+  confidence,
+  bbox: { x0, y0, x1, y1 },
+});
+
 test("reads sender name only from an explicit sender label, including common Thai OCR error", () => {
   const sender = findSenderName([
     line("๑๐   อาก", 100, 82),
@@ -135,6 +141,23 @@ test("recovers the ttb receiver from the real OCR layout with amount above party
     line("XXX-X-XX996-5", 1971, 89),
     line("ttb", 2016, 91),
     line("รหัสอ้างอิง 202508161903564508", 2105, 92),
+  ], { width: 2480, height: 3507 }, { qrAnchor: { x: 1640, y: 1480 } });
+
+  assert.equal(candidate.receiverName, "น.ส. จิณห์นิภา ประสาทเขตรการ");
+});
+
+test("accepts a Thai receiver box that overlaps the next account row by one pixel", () => {
+  const [candidate] = findSlipOcrRegions([
+    boundedLine("โอนเงินสำเร็จ", 1120, 1440, 1356, 1478, 94),
+    boundedLine("10,000.00", 1106, 1562, 1375, 1620, 91),
+    boundedLine("นาย ณัฐชัย รักษาวงษ์", 987, 1718, 1255, 1744, 94),
+    boundedLine("XXX-X-XX558-9", 988, 1769, 1197, 1788, 89),
+    boundedLine("tthe", 987, 1814, 1046, 1840, 33),
+    boundedLine("หน ยอด 20,000 (1)", 991, 1836, 1380, 1881, 96),
+    boundedLine("น.ส. จิณห์นิภา ประสาทเขตรการ", 899, 1917, 1368, 1972, 93),
+    boundedLine("XXX-X-XX996-5", 988, 1971, 1198, 1991, 89),
+    boundedLine("ttb", 987, 2016, 1021, 2036, 88),
+    boundedLine("รหัสอ้างอิง: 202508161903564508", 892, 2099, 1588, 2192, 88),
   ], { width: 2480, height: 3507 }, { qrAnchor: { x: 1640, y: 1480 } });
 
   assert.equal(candidate.receiverName, "น.ส. จิณห์นิภา ประสาทเขตรการ");

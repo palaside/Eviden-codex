@@ -698,7 +698,10 @@ export function findSlipOcrRegions(
     const earlyReceiverNameLine = earlyAccounts.length >= 2
       ? nearby
         .filter((line) => line.bbox.y0 > earlyAccounts[0].bbox.y1
-          && line.bbox.y1 < earlyAccounts[1].bbox.y0
+          // OCR boxes can touch/overlap the next account row by a few pixels
+          // when Thai glyph descenders extend below the visual baseline.
+          // Keep this tolerance narrow so an unrelated line is not promoted.
+          && line.bbox.y1 <= earlyAccounts[1].bbox.y0 + 4
           && !parseBank(line.text)
           && (cleanNoisyPartyName(line.text).match(/[\u0E01-\u0E3A\u0E40-\u0E4E]{2,}/g) ?? []).length >= 2
           && isPlausibleRecipientName(cleanNoisyPartyName(line.text)))
