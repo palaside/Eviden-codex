@@ -12,6 +12,7 @@ import { shouldBuildChatEvidenceLayers } from "@/utils/ocr-analysis-policy.mjs";
 import { reconcilePageOcrNamesIntoQrCandidates } from "@/utils/reconcile-slip-ocr-candidates.mjs";
 import { createCanvasEvidenceArtifact } from "@/utils/evidence-image-artifacts.mjs";
 import { buildOcrAttemptTrace, explainSlipOcrRegionRejection } from "@/utils/slip-ocr-trace.mjs";
+import { attachOcrTraceToQrCandidates } from "@/utils/local-ocr-fallback.mjs";
 import type { SlipOcrAttemptTrace, SlipOcrDiagnosticTrace, SlipOcrRegionTrace } from "@/types/slip-ocr-trace";
 import {
   evaluateEnhancedOcrRetry,
@@ -191,10 +192,11 @@ export async function extractSlipCandidatesWithLocalOcr(
     onRetryDiagnostic?: (message: string) => void;
   },
 ): Promise<LocalSlipCandidate[]> {
+  let diagnosticAttempts: SlipOcrAttemptTrace[] = [];
+  let lastDiagnosticTrace: SlipOcrDiagnosticTrace | null = null;
   try {
     const worker = await getLocalOcrWorker(workerSlot);
     let qrOcrCandidates: LocalSlipCandidate[] = [];
-    const diagnosticAttempts: SlipOcrAttemptTrace[] = [];
     const artifactInputs: Array<{
       id: string;
       kind: "source" | "ocr_variant" | "segmentation_mask";
@@ -222,17 +224,17 @@ export async function extractSlipCandidatesWithLocalOcr(
       }
     }
 
-    // A detected QR is a local anchor for the slip, so avoid recognizing the entire chat page first.
-    for (const qrCandidate of qrCandidates) {
+    // Chat pages use the QR anchor to avoid OCR over the entire page. A standalone
+    // slip is different: its whole canvas is already the evidence object, so the
+    // bounded QR retry loop would duplicate work and can hit the 120s job timeout.
+    if (options.jobKind !== "SLIP") for (const qrCandidate of qrCandidates) {
       const objectBounds = options.jobKind === "CHAT"
         ? findQrSlipObjectBounds(contourCandidates, qrCandidate.bounds, {
             width: canvas.width,
             height: canvas.height,
           })
         : null;
-      const fallbackBounds = options.jobKind === "SLIP"
-        ? getSoloSlipOcrCrop({ width: canvas.width, height: canvas.height }, qrCandidate.bounds)
-        : getQrAnchoredOcrCrop({ width: canvas.width, height: canvas.height }, qrCandidate.bounds);
+      const fallbackBounds = getQrAnchoredOcrCrop({ width: canvas.width, height: canvas.height }, qrCandidate.bounds);
       const paddingX = objectBounds ? Math.round(objectBounds.width * 0.015) : 0;
       const paddingY = objectBounds ? Math.round(objectBounds.height * 0.015) : 0;
       const cropBounds = objectBounds ? {
@@ -470,15 +472,9 @@ export async function extractSlipCandidatesWithLocalOcr(
       }
     }
 
-    // A QR-anchored standalone slip already has a bounded OCR pass above.
-    // Do not run a second full-page OCR over a multi-megapixel A4 canvas;
-    // that pass can monopolize the browser worker and leave the UI at 100%.
+    // Standalone slip jobs must also run OCR over the complete slip canvas.
+    // The QR crop is an anchor/fast path, not a substitute for transaction fields.
     let lines: ReturnType<typeof getOcrLines> = [];
-    if (options.jobKind === "SLIP" && qrCandidates.length > 0) {
-      lines = [];
-    } else {
-    // For chat pages, keep the full-page pass because it may contain slips
-    // outside the QR crop and it is part of the evidence-layer trace.
     const { data: originalData } = await worker.recognize(canvas, {}, { blocks: true });
     lines = getOcrLines(originalData);
     diagnosticAttempts.push(buildOcrAttemptTrace({
@@ -537,7 +533,6 @@ export async function extractSlipCandidatesWithLocalOcr(
       if (decision.accepted) {
         lines = enhancedLines;
       }
-    }
     }
     let visualCandidates: Awaited<ReturnType<typeof detectChatVisualRegions>>["regions"] = [];
     let contourAudit: Awaited<ReturnType<typeof detectChatVisualRegions>>["contourAudit"] | null = null;
@@ -598,6 +593,7 @@ export async function extractSlipCandidatesWithLocalOcr(
     let detectedSlipRegions = findSlipOcrRegions(
       lines.map((line) => ({ text: line.text, confidence: line.confidence, bbox: line.bbox })),
       { width: canvas.width, height: canvas.height },
+      { standaloneSlip: options.jobKind === "SLIP" },
     );
     if (options.jobKind === "CHAT" && visualCandidates.length) {
       const visualSlipCandidates = visualCandidates.filter(({ bounds, objectTypeCandidate }) => {
@@ -840,6 +836,7 @@ export async function extractSlipCandidatesWithLocalOcr(
       }),
       imageArtifacts,
     };
+    lastDiagnosticTrace = ocrDiagnosticTrace;
     const cachedLayers = chatEvidenceLayerCache.get(canvas);
     if (cachedLayers) chatEvidenceLayerCache.set(canvas, { ...cachedLayers, ocrDiagnosticTrace });
 
@@ -896,13 +893,41 @@ export async function extractSlipCandidatesWithLocalOcr(
       }),
     );
 
-    return [...qrOcrCandidates, ...uncoveredPageCandidates].map((candidate) => ({
+    const mergedCandidates = [...qrOcrCandidates, ...uncoveredPageCandidates].map((candidate) => ({
       ...candidate,
       ocrDiagnosticTrace: syncTraceWithCandidate(ocrDiagnosticTrace, candidate),
     }));
+    if (mergedCandidates.length === 0 && qrCandidates.length > 0) {
+      return attachOcrTraceToQrCandidates(qrCandidates, ocrDiagnosticTrace) as LocalSlipCandidate[];
+    }
+    return mergedCandidates;
   } catch (error) {
     const workerIndex = ((Math.floor(workerSlot) % OCR_WORKER_COUNT) + OCR_WORKER_COUNT) % OCR_WORKER_COUNT;
     workerPromises[workerIndex] = null;
+    if (qrCandidates.length > 0) {
+      const message = error instanceof Error ? error.message : String(error);
+      const fallbackTrace: SlipOcrDiagnosticTrace = lastDiagnosticTrace || {
+        schemaVersion: "digital-evidence.slip-ocr-trace.v2",
+        sourceDimensions: { width: canvas.width, height: canvas.height },
+        objectBounds: [],
+        qrBounds: qrCandidates.map(({ bounds }) => ({ ...bounds })),
+        attempts: diagnosticAttempts.length > 0 ? diagnosticAttempts : [{
+          id: "local-ocr-exception",
+          scope: "full_page",
+          trigger: "low_confidence",
+          sourceBounds: { x: 0, y: 0, width: canvas.width, height: canvas.height },
+          inputDimensions: { width: canvas.width, height: canvas.height },
+          scale: 1,
+          meanConfidence: 0,
+          lines: [],
+        }],
+        regions: [],
+        parserRejectionReasons: [`local-ocr-exception:${message}`],
+        imageArtifacts: [],
+      };
+      options.onRetryDiagnostic?.(`local OCR จบด้วย review_required: ${message}`);
+      return attachOcrTraceToQrCandidates(qrCandidates, fallbackTrace) as LocalSlipCandidate[];
+    }
     throw error;
   }
 }

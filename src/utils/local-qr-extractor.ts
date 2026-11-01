@@ -44,6 +44,8 @@ export interface LocalSlipCandidate {
 export interface LocalQrExtractionOptions {
   onError?: (error: unknown) => void;
   diagnosticProbeRegion?: { x: number; y: number; width: number; height: number };
+  /** Prevent synchronous enhancement from monopolising the UI on long chat canvases. */
+  maxEnhancedScanPixels?: number;
   onScanDiagnostics?: (diagnostics: NonNullable<import("@/types/embedded-slip").ChatEvidenceLayerPage["qrScanDiagnostic"]>) => void;
 }
 
@@ -168,6 +170,9 @@ export async function extractSlipsLocally(
     };
     const getExistingUpscaledScan = () => upscaledScan;
     const maxCandidates = 20;
+    const maxEnhancedScanPixels = Number.isFinite(options.maxEnhancedScanPixels)
+      ? Math.max(1, Math.floor(options.maxEnhancedScanPixels!))
+      : 1_000_000;
     let enhancementAttempted = false;
     let enhancementDecoded = false;
     let enhancementStages: string[] = [];
@@ -199,26 +204,30 @@ export async function extractSlipsLocally(
         qrUpscale,
       );
       if (!qrCode) {
-        enhancementAttempted = true;
-        const enhanced = await decodeQrWithEnhancedPixels(
-          scanData,
-          imageData.width,
-          imageData.height,
-          enhanceOcrPixels,
-          (pixels, width, height) => {
-            const scaled = qrUpscale > 1 ? scaleQrPixelsNearest(pixels, width, height, qrUpscale) : null;
-            return decodeQrWithUpscaleFallback(
-              () => runDecoder("jsQR", pixels, width, height, 1, "enhanced", candidateIndex),
-              () => runDecoder("ZXing", pixels, width, height, 1, "enhanced", candidateIndex),
-              () => scaled ? runDecoder("jsQR", scaled.data, scaled.width, scaled.height, qrUpscale, "enhanced-upscaled", candidateIndex) : null,
-              () => scaled ? runDecoder("ZXing", scaled.data, scaled.width, scaled.height, qrUpscale, "enhanced-upscaled", candidateIndex) : null,
-              qrUpscale,
-            );
-          },
-        );
-        enhancementDecoded = Boolean(enhanced.result);
-        enhancementStages = enhanced.stages;
-        qrCode = enhanced.result as typeof qrCode;
+        if (imageData.width * imageData.height <= maxEnhancedScanPixels) {
+          enhancementAttempted = true;
+          const enhanced = await decodeQrWithEnhancedPixels(
+            scanData,
+            imageData.width,
+            imageData.height,
+            enhanceOcrPixels,
+            (pixels, width, height) => {
+              const scaled = qrUpscale > 1 ? scaleQrPixelsNearest(pixels, width, height, qrUpscale) : null;
+              return decodeQrWithUpscaleFallback(
+                () => runDecoder("jsQR", pixels, width, height, 1, "enhanced", candidateIndex),
+                () => runDecoder("ZXing", pixels, width, height, 1, "enhanced", candidateIndex),
+                () => scaled ? runDecoder("jsQR", scaled.data, scaled.width, scaled.height, qrUpscale, "enhanced-upscaled", candidateIndex) : null,
+                () => scaled ? runDecoder("ZXing", scaled.data, scaled.width, scaled.height, qrUpscale, "enhanced-upscaled", candidateIndex) : null,
+                qrUpscale,
+              );
+            },
+          );
+          enhancementDecoded = Boolean(enhanced.result);
+          enhancementStages = enhanced.stages;
+          qrCode = enhanced.result as typeof qrCode;
+        } else {
+          enhancementStages = [`skipped-large-canvas:${imageData.width}x${imageData.height}`];
+        }
       }
       if (!qrCode?.data || !qrCode.location) break;
 

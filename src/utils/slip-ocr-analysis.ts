@@ -102,6 +102,7 @@ const normalizeText = (text: string) => text.normalize("NFKC").toLocaleLowerCase
 const hasAmountLabel = (text: string) => /[จขอ][ํำ]านวน(?:เง[ิี]?น|เว[ิี]น)|ยอดเงิน|amount/.test(text);
 const hasSuccessCue = (text: string) => /โอนเงิน.{0,4}(?:เร็จ|เรือ)|โอน.{0,4}สำเร็จ|transfersuccess|successfultransfer/.test(text);
 const hasReferenceCue = (text: string) => /(?:รหัส|เลขที่)อ้างอ.{0,2}ง|reference|transactionid/.test(text);
+const hasReferenceLikeToken = (text: string) => /\b\d{16,22}\b/.test(text);
 const hasFeeCue = (text: string) => /ค[่ํ]?าธรรมเนียม|fee/.test(text);
 const hasPartyCue = (text: string) => /ผู้โอน|ผู้รับ|ไปยัง|จาก|\bfrom\b|\bto\b/.test(text);
 
@@ -137,12 +138,18 @@ function parseThaiDateTime(lines: OcrTextLine[]): { date: string | null; time: s
     "ม.ค.": "01", "มกราคม": "01", "ก.พ.": "02", "กุมภาพันธ์": "02",
     "มี.ค.": "03", "มีนาคม": "03", "เม.ย.": "04", "เมษายน": "04",
     "พ.ค.": "05", "พฤษภาคม": "05", "มิ.ย.": "06", "มิย.": "06", "บิ.ย.": "06", "มิถุนายน": "06",
+    "เมย.": "04",
     "ก.ค.": "07", "กรกฎาคม": "07", "ส.ค.": "08", "สิงหาคม": "08",
     "ก.ย.": "09", "กันยายน": "09", "ต.ค.": "10", "ตุลาคม": "10",
     "พ.ย.": "11", "พฤศจิกายน": "11", "ธ.ค.": "12", "ธันวาคม": "12",
   };
   for (const line of lines) {
-    const text = line.text.replace(/[๐-๙]/g, (digit) => String("๐๑๒๓๔๕๖๗๘๙".indexOf(digit)));
+    // Local OCR commonly reads the compact Thai month "มิ.ย." on the ttb
+    // slip as "0.9.". Accept this alias only on the same line that also has
+    // a valid day/year pattern; no date is synthesized from a bare year.
+    const text = line.text
+      .replace(/0[.]9[.]/g, "มิ.ย.")
+      .replace(/[๐-๙]/g, (digit) => String("๐๑๒๓๔๕๖๗๘๙".indexOf(digit)));
     const monthName = Object.keys(months).sort((a, b) => b.length - a.length).find((name) => text.includes(name));
     if (!monthName) continue;
     const monthIndex = text.indexOf(monthName);
@@ -167,6 +174,14 @@ function parseThaiDateTime(lines: OcrTextLine[]): { date: string | null; time: s
       time: hourText && Number(hourText) < 24 && Number(minuteText) < 60 ? `${hourText.padStart(2, "0")}:${minuteText}` : null,
       confidence: Math.max(0, Math.min(1, line.confidence / 100)),
     };
+  }
+  // Keep a readable time even when OCR mangles the Thai month. Do not infer a
+  // date from an ambiguous numeric token; the date remains review_required.
+  for (const line of lines) {
+    const time = line.text.match(/\b(\d{1,2}):(\d{2})\b/);
+    if (time && Number(time[1]) < 24 && Number(time[2]) < 60) {
+      return { date: null, time: `${time[1].padStart(2, "0")}:${time[2]}`, confidence: Math.max(0, Math.min(1, line.confidence / 100)) };
+    }
   }
   return { date: null, time: null, confidence: 0 };
 }
@@ -194,7 +209,11 @@ function parseReference(text: string): string | null {
 }
 
 function parseBank(text: string): string | null {
-  return BANK_NAMES.find(([pattern]) => pattern.test(text))?.[1] ?? null;
+  // ttb's compact logo is frequently returned by local OCR as "tho" or
+  // "tho i". Accept that alias only through the same bank-line parser; the
+  // surrounding account/name geometry still decides whether it is evidence.
+  return BANK_NAMES.find(([pattern]) => pattern.test(text))?.[1]
+    ?? (/\btho(?:\s+i)?\b/i.test(text) ? "ธนาคารทหารไทยธนชาต" : null);
 }
 
 function isMaskedAccountLine(text: string): boolean {
@@ -244,6 +263,26 @@ function extractThaiNameFromNoisyOcrLine(text: string): string | null {
   return candidates.length === 1 ? candidates[0] : null;
 }
 
+function cleanNoisyPartyName(text: string): string {
+  return text
+    .trim()
+    .replace(/^[^\u0E01-\u0E3A\u0E40-\u0E4E]+/u, "")
+    .replace(/^ปส\s*\.?/u, "")
+    .replace(/^ปฝาย\s+/u, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cleanInlineSenderName(text: string): string {
+  return cleanNoisyPartyName(text)
+    // OCR often turns the honorific "นางสาว"/"น.ส." into "บางสาว".
+    // Remove only that leading token; the returned value remains a proposal
+    // and is never treated as human-confirmed identity.
+    .replace(/^บางสาว\s+/u, "")
+    .replace(/^บางสา\s+/u, "")
+    .trim();
+}
+
 const RECIPIENT_LABEL = /^[\s➜→›»•●✓|@]*(?:(?:\(\s*\d{1,2}\s*\)|[a-z]\)|[0-9๐-๙]{1,2})\s*[.)]?\s*)?[\s➜→›»•●✓|@]*(?:ไปย[ัา]?ง|ผู[้]?รับ(?:โอน|เงิน)?|ชื่อผู[้]?รับ)\s*[:：\-]?\s*(.*)/i;
 const SENDER_LABEL = /^[\s➜→›»•●✓|@]*(?:(?:\(\s*\d{1,2}\s*\)|[0-9๐-๙]{1,2})\s*[.)]?\s*)?[\s➜→›»•●✓|@]*(?:จาก|อาก|ผู้โอน|ผู[้]?ส่ง|ต้นทาง|from|sender)\s*[:：\-]?\s*(.*)/i;
 const isPlausiblePersonName = (text: string) => isPlausibleRecipientName(text)
@@ -261,7 +300,7 @@ export function findSenderName(lines: OcrTextLine[], coordinateScale = 1): { nam
     const label = lines[index];
     const match = label.text.replace(/^[\s\p{P}\p{S}]+/u, "").match(SENDER_LABEL);
     if (!match) continue;
-    const inlineName = match[1].trim().replace(/^[|\-:：\s]+/, "");
+    const inlineName = cleanInlineSenderName(match[1].trim().replace(/^[|\-:：\s]+/, ""));
     const nameLine = inlineName
       ? { ...label, text: inlineName }
       : lines.slice(index + 1).find((candidate) => {
@@ -475,7 +514,7 @@ function findRecipientImmediatelyBeforeAccount(
   if (candidates.length !== 1) return empty;
   const nameLine = candidates[0];
   return {
-    name: nameLine.text.trim(),
+    name: cleanNoisyPartyName(nameLine.text),
     confidence: Math.max(0, Math.min(1, nameLine.confidence / 100)),
     labelLine: null,
     nameLine,
@@ -489,7 +528,7 @@ function findRecipientMatch(lines: OcrTextLine[], coordinateScale = 1, requireTh
     const match = labelText.match(RECIPIENT_LABEL);
     if (!match) continue;
 
-    let name = match[1].trim().replace(/^[|\-:：\s]+/, "");
+    let name = cleanNoisyPartyName(match[1].trim().replace(/^[|\-:：\s]+/, ""));
     if (requireThaiName && (name.match(/[\u0E01-\u0E3A\u0E40-\u0E4E]{2,}/g) ?? []).length < 2) name = "";
     let nameLine = labelLine;
     if (!name) {
@@ -509,7 +548,7 @@ function findRecipientMatch(lines: OcrTextLine[], coordinateScale = 1, requireTh
             || right.confidence - left.confidence;
         })[0];
       if (!followingLine) continue;
-      name = followingLine.text.trim();
+      name = cleanNoisyPartyName(followingLine.text);
       nameLine = followingLine;
     }
     if (!isPlausibleRecipientName(name)) continue;
@@ -535,10 +574,11 @@ export function findRecipientName(lines: OcrTextLine[], coordinateScale = 1): { 
 export function findSlipOcrRegions(
   lines: OcrTextLine[],
   image: { width: number; height: number },
-  options: { includeRecipientSearchBand?: boolean; qrAnchor?: { x: number; y: number }; contourBoundary?: boolean } = {},
+  options: { includeRecipientSearchBand?: boolean; qrAnchor?: { x: number; y: number }; contourBoundary?: boolean; standaloneSlip?: boolean } = {},
 ): SlipOcrRegion[] {
   const prepared = lines.map((line) => ({ ...line, normalized: normalizeText(line.text) }));
-  const amountAnchors = prepared.filter((line) => hasAmountLabel(line.normalized));
+  const amountAnchors = prepared.filter((line) => hasAmountLabel(line.normalized)
+    || (options.standaloneSlip && parseStandaloneAmount(line.text) !== null));
   const anchors = options.qrAnchor
     ? [prepared.filter((line) => hasSuccessCue(line.normalized) && line.bbox.y0 < options.qrAnchor!.y)
       .sort((a, b) => Math.abs((a.bbox.y0 + a.bbox.y1) / 2 - options.qrAnchor!.y)
@@ -546,7 +586,7 @@ export function findSlipOcrRegions(
       ?? prepared.filter((line) => hasAmountLabel(line.normalized) || hasReferenceCue(line.normalized))
         .sort((a, b) => Math.abs((a.bbox.y0 + a.bbox.y1) / 2 - options.qrAnchor!.y)
           - Math.abs((b.bbox.y0 + b.bbox.y1) / 2 - options.qrAnchor!.y))[0]].filter(Boolean)
-    : amountAnchors.length > 0
+      : amountAnchors.length > 0
     ? amountAnchors
     : prepared.filter((line) => hasSuccessCue(line.normalized));
   const regions: SlipOcrRegion[] = [];
@@ -557,7 +597,9 @@ export function findSlipOcrRegions(
       && prepared.some((line) => hasReferenceCue(line.normalized)
         && Math.abs(line.bbox.x0 - anchor.bbox.x0) <= anchorHorizontalTolerance
         && Math.abs(line.bbox.y0 - anchor.bbox.y0) <= 700);
-    const nearby = prepared.filter((line) => options.qrAnchor
+    const nearby = options.standaloneSlip
+      ? prepared
+      : prepared.filter((line) => options.qrAnchor
       ? line.bbox.y0 <= image.height
       : hasNearbyUnanchoredReference
         ? Math.abs(line.bbox.x0 - anchor.bbox.x0) <= anchorHorizontalTolerance
@@ -573,6 +615,7 @@ export function findSlipOcrRegions(
         .sort((left, right) => Math.abs((left.bbox.y0 + left.bbox.y1) / 2 - options.qrAnchor!.y)
           - Math.abs((right.bbox.y0 + right.bbox.y1) / 2 - options.qrAnchor!.y))[0]
       : nearby.find((line) => hasAmountLabel(line.normalized) && parseAmount(line.text) !== null)
+        ?? (options.standaloneSlip ? nearby.find((line) => parseStandaloneAmount(line.text) !== null) : undefined)
         ?? (hasSuccessCue(anchor.normalized) && nearby.some((line) => hasReferenceCue(line.normalized))
           ? nearby.filter((line) => !hasFeeCue(line.normalized) && parseStandaloneAmount(line.text) !== null)
             .sort((left, right) => Math.abs((left.bbox.y0 + left.bbox.y1) / 2 - (anchor.bbox.y0 + anchor.bbox.y1) / 2)
@@ -594,10 +637,11 @@ export function findSlipOcrRegions(
           const lineCenterY = (line.bbox.y0 + line.bbox.y1) / 2;
           if (lineCenterY <= senderCenterY || lineCenterY >= receiverCenterY
             || receiverCenterY - lineCenterY > 180 || parseBank(line.text)) return [];
-          const hasThaiNameTokens = (line.text.match(/[\u0E01-\u0E3A\u0E40-\u0E4E]{2,}/g) ?? []).length >= 2;
-          const name = hasThaiNameTokens && isPlausibleRecipientName(line.text)
-            ? line.text.trim()
-            : extractThaiNameFromNoisyOcrLine(line.text);
+          const cleanedPartyText = cleanNoisyPartyName(line.text);
+          const hasThaiNameTokens = (cleanedPartyText.match(/[\u0E01-\u0E3A\u0E40-\u0E4E]{2,}/g) ?? []).length >= 2;
+          const name = hasThaiNameTokens && isPlausibleRecipientName(cleanedPartyText)
+            ? cleanedPartyText
+            : extractThaiNameFromNoisyOcrLine(cleanedPartyText);
           return name ? [{ line, name }] : [];
         });
         if (possibleNames.length === 1) {
@@ -650,6 +694,25 @@ export function findSlipOcrRegions(
       ? { name: null, confidence: 0, labelLine: null, nameLine: null }
       : detectedRecipient;
     let recipient = labeledRecipient;
+    const earlyAccounts = nearby.filter((line) => isMaskedAccountLine(line.text)).sort((left, right) => left.bbox.y0 - right.bbox.y0);
+    const earlyReceiverNameLine = earlyAccounts.length >= 2
+      ? nearby
+        .filter((line) => line.bbox.y0 > earlyAccounts[0].bbox.y1
+          && line.bbox.y1 < earlyAccounts[1].bbox.y0
+          && !parseBank(line.text)
+          && (cleanNoisyPartyName(line.text).match(/[\u0E01-\u0E3A\u0E40-\u0E4E]{2,}/g) ?? []).length >= 2
+          && isPlausibleRecipientName(cleanNoisyPartyName(line.text)))
+        .sort((left, right) => Math.abs(left.bbox.y0 - earlyAccounts[1].bbox.y0)
+          - Math.abs(right.bbox.y0 - earlyAccounts[1].bbox.y0))[0]
+      : undefined;
+    if (!recipient.name && earlyReceiverNameLine) {
+      recipient = {
+        name: cleanNoisyPartyName(earlyReceiverNameLine.text),
+        confidence: Math.max(0, Math.min(1, earlyReceiverNameLine.confidence / 100)),
+        labelLine: null,
+        nameLine: earlyReceiverNameLine,
+      };
+    }
     let accountBlockMatch: RecipientMatch | null = null;
     if (amountLine && (options.qrAnchor || hasAmountLabel(anchor.normalized))) {
       const krungthai = findKrungthaiRecipientFromAccountBlocks(nearby, amountLine);
@@ -723,7 +786,8 @@ export function findSlipOcrRegions(
       if (preparedLine && !focusLines.includes(preparedLine)) focusLines.push(preparedLine);
     }
     const success = nearby.some((line) => hasSuccessCue(line.normalized));
-    const referenceCue = nearby.some((line) => hasReferenceCue(line.normalized));
+    const referenceCue = nearby.some((line) => hasReferenceCue(line.normalized))
+      || nearby.some((line) => hasReferenceLikeToken(line.text));
     const feeCue = nearby.some((line) => hasFeeCue(line.normalized));
     const partyCue = nearby.some((line) => hasPartyCue(line.normalized));
     const transactionLines = options.qrAnchor && amountLine
@@ -756,7 +820,8 @@ export function findSlipOcrRegions(
       && success
       && referenceCue
       && (bankName || (feeCue && amountLine));
-    const transactionReferenceCue = transactionLines.some((line) => hasReferenceCue(line.normalized));
+    const transactionReferenceCue = transactionLines.some((line) => hasReferenceCue(line.normalized)
+      || hasReferenceLikeToken(line.text));
     const supportedByQrEvidence = !!options.qrAnchor && !!amountLine && bankName && transactionReferenceCue;
     if (!supportedAmount && !supportedWithoutAmount && !supportedByQrEvidence) continue;
 
@@ -768,13 +833,12 @@ export function findSlipOcrRegions(
       ? parseTimestampFromReference(referenceNo)
       : null;
     const date = parsedDateTime.date ?? referenceTimestamp?.date ?? null;
-    const time = parsedDateTime.date
-      ? parsedDateTime.time
-      : options.qrAnchor ? referenceTimestamp?.time ?? null : null;
+    const time = parsedDateTime.time
+      ?? (options.qrAnchor ? referenceTimestamp?.time ?? null : null);
     const dateTimeConfidence = parsedDateTime.date
       ? parsedDateTime.confidence
       : referenceTimestamp ? Math.min(0.65, referenceLine ? Math.max(0, referenceLine.confidence / 100) : 0) : 0;
-    const timeConfidence = parsedDateTime.date || (options.qrAnchor && referenceTimestamp)
+    const timeConfidence = parsedDateTime.time ? parsedDateTime.confidence : (options.qrAnchor && referenceTimestamp)
       ? dateTimeConfidence
       : 0;
     const labeledSender = findSenderName(nearby);
@@ -786,6 +850,17 @@ export function findSlipOcrRegions(
       .sort((left, right) => left.bbox.y0 - right.bbox.y0);
     const senderAccountFallback = orderedPartyAccounts.length === 2 ? orderedPartyAccounts[0] : undefined;
     const receiverAccountFallback = orderedPartyAccounts.length === 2 ? orderedPartyAccounts[1] : undefined;
+    const observedPartyName = (line: OcrTextLine | undefined) => {
+      if (!line || parseBank(line.text) || isMaskedAccountLine(line.text)) return false;
+      const cleaned = cleanNoisyPartyName(line.text);
+      return (cleaned.match(/[\u0E01-\u0E3A\u0E40-\u0E4E]{2,}/g) ?? []).length >= 2
+        && isPlausibleRecipientName(cleaned);
+    };
+    const directSenderNameLine = senderAccountFallback
+      ? nearby
+        .filter((line) => line.bbox.y1 < senderAccountFallback.bbox.y0 && observedPartyName(line))
+        .sort((left, right) => right.bbox.y0 - left.bbox.y0)[0]
+      : undefined;
     const senderFallback = !labeledSender.name && !senderBlockMatch?.name && senderAccountFallback
       ? (() => {
           const senderBankLine = nearby
@@ -807,7 +882,7 @@ export function findSlipOcrRegions(
           if (candidates.length !== 1) return null;
           const nameLine = candidates[0];
           return {
-            name: nameLine.text.trim(),
+            name: cleanNoisyPartyName(nameLine.text),
             confidence: Math.max(0, Math.min(1, nameLine.confidence / 100)),
             nameLine,
             accountLine: senderAccountFallback,
@@ -819,7 +894,13 @@ export function findSlipOcrRegions(
       ? labeledSender
       : senderBlockMatch?.name
         ? senderBlockMatch
-        : senderFallback ?? labeledSender;
+        : senderFallback ?? (directSenderNameLine
+          ? {
+            name: cleanNoisyPartyName(directSenderNameLine.text),
+            confidence: Math.max(0, Math.min(1, directSenderNameLine.confidence / 100)),
+            nameLine: directSenderNameLine,
+          }
+          : labeledSender);
     const senderLabelIndex = nearby.findIndex((line) => SENDER_LABEL.test(line.text.replace(/^[\s\p{P}\p{S}]+/u, "")));
     const recipientLabelIndex = nearby.findIndex((line) => RECIPIENT_LABEL.test(line.text.replace(/^[\s\p{P}\p{S}]+/u, "")));
     const partyBoundary = recipientLabelIndex > senderLabelIndex && senderLabelIndex >= 0 ? recipientLabelIndex : nearby.length;
@@ -970,6 +1051,81 @@ export function findSlipOcrRegions(
       rawText: rawTextLines.map((line) => line.text).join("\n"),
       ocrLineEvidence,
     });
+  }
+
+  // A standalone slip can be readable while still failing the normal anchor
+  // heuristics (for example when the amount label or Thai month is OCR-mangled).
+  // Preserve only directly observed lines as a review candidate; never repair
+  // or infer missing values here.
+  if (options.standaloneSlip && regions.length === 0) {
+    const amountLine = prepared.find((line) => parseStandaloneAmount(line.text) !== null);
+    const successLine = prepared.find((line) => hasSuccessCue(line.normalized));
+    const referenceLine = prepared.find((line) => hasReferenceLikeToken(line.text));
+    if (amountLine && successLine && referenceLine) {
+      const accounts = prepared.filter((line) => isMaskedAccountLine(line.text));
+      const thaiLines = prepared.filter((line) => /[\u0E00-\u0E7F]{3,}/u.test(line.text)
+        && !isMaskedAccountLine(line.text)
+        && !parseBank(line.text)
+        && !hasSuccessCue(line.normalized)
+        && !hasFeeCue(line.normalized));
+      const senderLine = thaiLines.find((line) => line.bbox.y0 < (accounts[0]?.bbox.y0 ?? amountLine.bbox.y0));
+      const receiverLine = thaiLines.find((line) => line.bbox.y0 > (accounts[0]?.bbox.y1 ?? amountLine.bbox.y1));
+      const parsedTime = parseThaiDateTime(prepared);
+      const bankLine = prepared.find((line) => parseBank(line.text));
+      const ref = referenceLine.text.match(/\b\d{16,22}\b/)?.[0] ?? null;
+      const bounds = { x0: 0, y0: 0, x1: image.width, y1: image.height };
+      const evidence = prepared.map((line) => {
+        const supportsFields = [
+          line === amountLine ? "amount" : null,
+          line === parsedTime && parsedTime.time ? "time" : null,
+          line === bankLine ? "bank" : null,
+          line === referenceLine ? "reference" : null,
+          line === senderLine ? "sender_name" : null,
+          line === receiverLine ? "receiver_name" : null,
+          accounts[0] === line ? "sender_account" : null,
+          accounts[1] === line ? "receiver_account" : null,
+        ].filter(Boolean) as string[];
+        return {
+          text: line.text,
+          confidence: Math.max(0, Math.min(1, line.confidence / 100)),
+          bounds: { x: line.bbox.x0, y: line.bbox.y0, width: line.bbox.x1 - line.bbox.x0, height: line.bbox.y1 - line.bbox.y0 },
+          classification: supportsFields.length ? "slip_evidence" as const : "uncertain" as const,
+          reason: supportsFields.length ? `เชื่อมกับฟิลด์: ${supportsFields.join(", ")}` : "อยู่ในภาพสลิปแต่ยังไม่ผูกกับฟิลด์",
+          supportsFields,
+        };
+      });
+      regions.push({
+        bounds,
+        focusBounds: bounds,
+        recipientFocusBounds: null,
+        amount: parseStandaloneAmount(amountLine.text),
+        amountConfidence: Math.max(0, Math.min(1, amountLine.confidence / 100)),
+        fee: null,
+        feeConfidence: 0,
+        date: parsedTime.date,
+        dateConfidence: parsedTime.date ? parsedTime.confidence : 0,
+        dateTimeSource: parsedTime.date ? "ocr" : null,
+        time: parsedTime.time,
+        timeConfidence: parsedTime.time ? parsedTime.confidence : 0,
+        referenceNo: ref,
+        referenceConfidence: Math.max(0, Math.min(1, referenceLine.confidence / 100)),
+        bankName: bankLine ? parseBank(bankLine.text) : null,
+        bankConfidence: bankLine ? Math.max(0, Math.min(1, bankLine.confidence / 100)) : 0,
+        receiverName: receiverLine?.text.trim() ?? null,
+        receiverNameConfidence: receiverLine ? Math.max(0, Math.min(1, receiverLine.confidence / 100)) : 0,
+        receiverNameRetryConflict: false,
+        senderName: senderLine?.text.trim() ?? null,
+        senderNameConfidence: senderLine ? Math.max(0, Math.min(1, senderLine.confidence / 100)) : 0,
+        senderAccount: accounts[0] ? extractMaskedAccount(accounts[0].text) : null,
+        senderAccountConfidence: accounts[0] ? Math.max(0, Math.min(1, accounts[0].confidence / 100)) : 0,
+        receiverAccount: accounts[1] ? extractMaskedAccount(accounts[1].text) : null,
+        receiverAccountConfidence: accounts[1] ? Math.max(0, Math.min(1, accounts[1].confidence / 100)) : 0,
+        senderBankName: null,
+        receiverBankName: null,
+        rawText: prepared.map((line) => line.text).join("\n"),
+        ocrLineEvidence: evidence,
+      });
+    }
   }
 
   return regions;

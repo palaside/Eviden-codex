@@ -59,8 +59,34 @@ export interface EmbeddedSlipRecord {
     source: "template_region_only";
     bounds: { x: number; y: number; width: number; height: number };
     cropDataUrl: string;
+    cropSha256?: string;
+    rawOcr?: string | null;
+    confidence?: number;
+    alternatives?: string[];
+    visual_quality?: "pass" | "review_required";
+    region_quality?: "pass" | "fail" | "review_required";
+    recognition_quality?: "pass" | "conflict" | "review_required";
+    review_status?: "review_required" | "human_reviewed";
     status: "review";
   }>;
+  fieldQualitySummary?: {
+    visual_quality: "pass" | "review_required";
+    region_quality: "pass" | "review_required";
+    recognition_quality: "pass" | "conflict" | "review_required";
+    review_status: "review_required";
+  };
+  bankEvidence?: {
+    value: string | null;
+    rawOcr: string | null;
+    confidence: number;
+    bounds: { x: number; y: number; width: number; height: number } | null;
+    logoCropDataUrl?: string;
+    logoCropSha256?: string;
+    evidence: { text: boolean; logo: boolean };
+    status: "pass" | "review_required" | "human_reviewed";
+    reviewedValue?: string | null;
+    reviewedAt?: string;
+  };
 }
 
 export interface ChatEvidenceLayerPage {

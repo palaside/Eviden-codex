@@ -4,11 +4,58 @@ function stripMaskPreview(trace) {
   return { ...diagnostic, maskPreviewsOmitted: Boolean(maskPreviews) };
 }
 
+function getFieldConflicts(candidate) {
+  const warnings = candidate.data?.warnings || [];
+  const conflicts = [];
+  const ocrVariants = (candidate.ocrDiagnosticTrace?.attempts || [])
+    .flatMap((attempt) => attempt.lines || [])
+    .map((line) => line.text?.trim())
+    .filter(Boolean);
+  const receiverOcrVariants = ocrVariants.filter((value) => /(?:ไปยัง|ผู้รับ)/u.test(value));
+  if (warnings.some((warning) => /OCR ตรวจชื่อผู้รับซ้ำแล้วได้ผลต่างกัน/u.test(warning))) {
+    const field = (candidate.fieldCrops || []).find((entry) => entry.field === "receiver_name");
+    conflicts.push({
+      field: "receiver_name",
+      values: [...new Set([field?.rawOcr, ...(field?.alternatives || []), ...receiverOcrVariants].filter(Boolean))],
+      reason: "OCR หลายรอบอ่านชื่อผู้รับต่างกัน",
+      status: "review_required",
+    });
+  }
+  if (warnings.some((warning) => /OCR ตรวจชื่อผู้โอนซ้ำแล้วได้ผลต่างกัน/u.test(warning))) {
+    const field = (candidate.fieldCrops || []).find((entry) => entry.field === "sender_name");
+    conflicts.push({
+      field: "sender_name",
+      values: [field?.rawOcr, ...(field?.alternatives || [])].filter(Boolean),
+      reason: "OCR หลายรอบอ่านชื่อผู้โอนต่างกัน",
+      status: "review_required",
+    });
+  }
+  return conflicts;
+}
+
 function candidateTrace(candidate, source) {
   if (!candidate) return null;
   const record = Object.fromEntries(Object.entries(candidate).filter(([key]) => key !== "cropDataUrl" && key !== "ocrDiagnosticTrace"));
+  const fieldEvidence = {};
+  for (const box of candidate.ocrTextBoxes || []) {
+    for (const field of box.supportsFields || []) {
+      const current = fieldEvidence[field];
+      if (!current || box.confidence > current.confidence) {
+        fieldEvidence[field] = {
+          value: box.text.trim(),
+          rawOcr: box.text,
+          confidence: box.confidence,
+          bounds: box.bounds,
+          source: "local_ocr",
+          sourceSha256: source.sha256 || null,
+        };
+      }
+    }
+  }
   return {
     ...record,
+    fieldEvidence,
+    fieldConflicts: getFieldConflicts(candidate),
     source,
     ocrDiagnosticTrace: stripMaskPreview(candidate.ocrDiagnosticTrace),
   };
@@ -36,6 +83,27 @@ function getCandidates(item) {
   }));
 }
 
+function candidateRichness(candidate) {
+  const data = candidate?.data || {};
+  return [
+    data.transaction?.amount,
+    data.transaction?.date,
+    data.transaction?.time,
+    data.sender?.name,
+    data.sender?.account_no,
+    data.receiver?.name,
+    data.receiver?.account_no,
+    data.bank?.name,
+  ].filter((value) => value !== null && value !== undefined && String(value).trim() !== "").length;
+}
+
+function getPrimaryCandidate(item) {
+  return (item.embeddedSlips || []).reduce((best, candidate) => {
+    if (!best || candidateRichness(candidate) > candidateRichness(best)) return candidate;
+    return best;
+  }, null);
+}
+
 function flattenDiagnostics(item) {
   const pages = item.chatEvidenceLayers || [];
   const traces = [
@@ -53,10 +121,12 @@ function flattenDiagnostics(item) {
 export function buildEvidenceDiagnosticTrace(stagedQueue, manifestList, generatedAt = new Date().toISOString()) {
   const items = stagedQueue.map((item) => {
     const { traces, qrScans } = flattenDiagnostics(item);
+    const primaryCandidate = getPrimaryCandidate(item);
     const productionScans = qrScans.flatMap((scan) => scan.productionScans || []);
     const diagnosticScans = qrScans.flatMap((scan) => scan.scans || []);
     return {
       id: item.id,
+      processingRunId: item.processingRunId || null,
       source: {
         fileName: item.meta?.file_name || item.file?.name || null,
         mimeType: item.meta?.mime_type || item.file?.type || null,
@@ -69,6 +139,8 @@ export function buildEvidenceDiagnosticTrace(stagedQueue, manifestList, generate
       isDuplicate: Boolean(item.isDuplicate),
       duplicateOf: item.duplicateOfRef || null,
       extractionVersion: item.extractionVersion ?? null,
+      data: item.data || primaryCandidate?.data || null,
+      primaryCandidateId: primaryCandidate?.id || null,
       error: item.error || null,
       warnings: item.processingWarnings || [],
       enhancementArtifact: item.enhancementArtifact || null,

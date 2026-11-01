@@ -46,6 +46,212 @@ import { fetchWithTimeout } from "@/utils/fetch-with-timeout.mjs";
 const QR_OCR_JOB_TIMEOUT_MS = 120_000;
 const DERIVED_IMAGE_REQUEST_TIMEOUT_MS = 45_000;
 
+async function hashDataUrl(dataUrl: string): Promise<string> {
+  const comma = dataUrl.indexOf(",");
+  if (comma < 0) return sha256Hex(new TextEncoder().encode(dataUrl));
+  const binary = atob(dataUrl.slice(comma + 1));
+  return sha256Hex(Uint8Array.from(binary, (char) => char.charCodeAt(0)));
+}
+
+async function buildLocalFieldCrops(record: EmbeddedSlipRecord): Promise<NonNullable<EmbeddedSlipRecord["fieldCrops"]>> {
+  if (!record.cropDataUrl || !record.ocrTextBoxes?.length) return [];
+  const image = new Image();
+  image.src = record.cropDataUrl;
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error("โหลด crop เพื่อสร้าง field provenance ไม่สำเร็จ"));
+  });
+  type LocalOcrBox = NonNullable<EmbeddedSlipRecord["ocrTextBoxes"]>[number];
+  const fields = new Map<string, LocalOcrBox[]>();
+  for (const box of record.ocrTextBoxes) {
+    for (const field of box.supportsFields || []) {
+      fields.set(field, [...(fields.get(field) || []), box]);
+    }
+  }
+  const result: NonNullable<EmbeddedSlipRecord["fieldCrops"]> = [];
+  for (const [field, boxes] of fields) {
+    const box = [...boxes].sort((left, right) => right.confidence - left.confidence)[0];
+    const x = Math.max(0, Math.floor(box.bounds.x));
+    const y = Math.max(0, Math.floor(box.bounds.y));
+    const width = Math.min(image.naturalWidth - x, Math.max(1, Math.ceil(box.bounds.width)));
+    const height = Math.min(image.naturalHeight - y, Math.max(1, Math.ceil(box.bounds.height)));
+    if (width <= 0 || height <= 0) continue;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d")?.drawImage(image, x, y, width, height, 0, 0, width, height);
+    const cropDataUrl = canvas.toDataURL("image/png");
+    result.push({
+      field,
+      source: "template_region_only",
+      bounds: { x, y, width, height },
+      cropDataUrl,
+      cropSha256: await hashDataUrl(cropDataUrl),
+      rawOcr: box.rawOcr || box.text,
+      confidence: box.confidence,
+      alternatives: [...new Set(boxes.map((candidate) => candidate.rawOcr || candidate.text).filter((value) => value && value !== (box.rawOcr || box.text)))],
+      visual_quality: "pass",
+      region_quality: "pass",
+      recognition_quality: box.confidence >= 0.9 ? "pass" : "review_required",
+      review_status: "review_required",
+      status: "review",
+    });
+  }
+  return result;
+}
+
+async function buildBankEvidence(record: EmbeddedSlipRecord): Promise<NonNullable<EmbeddedSlipRecord["bankEvidence"]>> {
+  const traceLines = (record.ocrDiagnosticTrace?.attempts || [])
+    .flatMap((attempt) => attempt.lines || [])
+    .map((line) => ({ text: line.text, confidence: line.confidence / 100, bounds: line.bounds }));
+  const bankLine = [...(record.ocrTextBoxes || []), ...traceLines]
+    .filter((box) => /ธนาคาร|^\s*ธ.{1,8}\s*$|กรุงไทย|กสิกร|กรุงเทพ|ไทยพาณิชย์|กรุงศรี|ทหารไทย|ttb|gsb|bank/i.test(box.text))
+    .sort((left, right) => right.confidence - left.confidence)[0];
+  const knownBank = bankLine?.text.match(/กรุงไทย|krungthai|กสิกรไทย|kasikorn|กรุงเทพ|bangkok\s*bank|ไทยพาณิชย์|\bscb\b|กรุงศรี|krungsri|ทหารไทยธนชาต|ทีเอ็มบีธนชาต|\bttb\b|ออมสิน|\bgsb\b/i);
+  const evidence = {
+    value: knownBank ? bankLine?.text.trim() || null : null,
+    rawOcr: bankLine?.text || null,
+    confidence: knownBank ? bankLine?.confidence || 0 : 0,
+    bounds: bankLine?.bounds || null,
+    evidence: { text: Boolean(knownBank), logo: false },
+    status: knownBank ? "pass" : "review_required",
+  } as NonNullable<EmbeddedSlipRecord["bankEvidence"]>;
+  if (!record.cropDataUrl) return evidence;
+  try {
+    const image = new Image();
+    image.src = record.cropDataUrl;
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error("โหลด crop ธนาคารไม่สำเร็จ"));
+    });
+    const padding = 12;
+    const lineFitsCrop = bankLine
+      && bankLine.bounds.x < image.naturalWidth
+      && bankLine.bounds.y < image.naturalHeight
+      && bankLine.bounds.x + bankLine.bounds.width > 0
+      && bankLine.bounds.y + bankLine.bounds.height > 0;
+    // OCR trace coordinates may be in the full-page coordinate space while
+    // cropDataUrl is slip-local. When they do not fit, retain a bounded
+    // top-band visual evidence crop and keep logo verification review-only.
+    const x = lineFitsCrop ? Math.max(0, Math.floor(bankLine.bounds.x - padding)) : 0;
+    const y = lineFitsCrop ? Math.max(0, Math.floor(bankLine.bounds.y - padding)) : 0;
+    const width = lineFitsCrop
+      ? Math.min(image.naturalWidth - x, Math.max(1, Math.ceil(bankLine.bounds.width + padding * 2)))
+      : Math.max(1, Math.floor(image.naturalWidth * 0.4));
+    const height = lineFitsCrop
+      ? Math.min(image.naturalHeight - y, Math.max(1, Math.ceil(bankLine.bounds.height + padding * 2)))
+      : Math.max(1, Math.floor(image.naturalHeight * 0.22));
+    if (width > 0 && height > 0) {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext("2d")?.drawImage(image, x, y, width, height, 0, 0, width, height);
+      const logoCropDataUrl = canvas.toDataURL("image/png");
+      evidence.bounds = { x, y, width, height };
+      evidence.logoCropDataUrl = logoCropDataUrl;
+      evidence.logoCropSha256 = await hashDataUrl(logoCropDataUrl);
+    }
+  } catch {
+    // Keep the evidence explicit and review-only if the visual crop cannot be built.
+  }
+  return evidence;
+}
+
+function getCandidateFieldValue(data: SlipExtraction, field: string): string | null {
+  const values: Record<string, unknown> = {
+    bank_name: data.bank?.name,
+    amount: data.transaction?.amount,
+    date: data.transaction?.date,
+    time: data.transaction?.time,
+    reference_no: data.transaction?.reference_no,
+    transaction_id: data.transaction?.transaction_id,
+    sender_name: data.sender?.name,
+    sender_account: data.sender?.account_no,
+    sender_bank: data.sender?.bank,
+    receiver_name: data.receiver?.name,
+    receiver_account: data.receiver?.account_no,
+    receiver_bank: data.receiver?.bank,
+  };
+  const value = values[field];
+  return value === null || value === undefined ? null : String(value);
+}
+
+function selectBestSlipCandidate<T extends { data: SlipExtraction }>(candidates: T[]): T | null {
+  if (!candidates.length) return null;
+  const score = (candidate: T) => [
+    candidate.data.transaction.amount,
+    candidate.data.transaction.date,
+    candidate.data.transaction.time,
+    candidate.data.sender.name,
+    candidate.data.sender.account_no,
+    candidate.data.receiver.name,
+    candidate.data.receiver.account_no,
+    candidate.data.bank.name && !candidate.data.bank.name.includes("ธนาคารไม่ระบุ"),
+  ].filter((value) => value !== null && value !== undefined && value !== "" && value !== false).length;
+  const selected = candidates.reduce((best, candidate) => score(candidate) > score(best) ? candidate : best);
+  const qrCandidate = candidates[0];
+  const confidenceFor = (candidate: T, field: string) => {
+    const value = (candidate.data.confidence as Record<string, number | undefined> | undefined)?.[field];
+    return typeof value === "number" ? value : 0;
+  };
+  const present = (value: unknown) => value !== null && value !== undefined && String(value).trim() !== "";
+  const chooseField = (field: string, read: (data: SlipExtraction) => unknown) => candidates
+    .map((candidate, index) => ({ candidate, index, value: read(candidate.data), confidence: confidenceFor(candidate, field) }))
+    .filter(({ value }) => present(value))
+    .sort((left, right) => right.confidence - left.confidence || left.index - right.index)[0];
+  const merged = {
+    ...selected.data,
+    bank: { ...selected.data.bank },
+    transaction: { ...selected.data.transaction },
+    sender: { ...selected.data.sender },
+    receiver: { ...selected.data.receiver },
+    confidence: { ...selected.data.confidence },
+  };
+  const fields = [
+    ["bank_name", (data: SlipExtraction) => data.bank.name && !data.bank.name.includes("ธนาคารไม่ระบุ") ? data.bank.name : null, (value: unknown) => { merged.bank.name = String(value); }],
+    ["amount", (data: SlipExtraction) => data.transaction.amount, (value: unknown) => { merged.transaction.amount = Number(value); }],
+    ["date", (data: SlipExtraction) => data.transaction.date, (value: unknown) => { merged.transaction.date = String(value); }],
+    ["time", (data: SlipExtraction) => data.transaction.time, (value: unknown) => { merged.transaction.time = String(value); }],
+    ["sender_name", (data: SlipExtraction) => data.sender.name, (value: unknown) => { merged.sender.name = String(value); }],
+    ["sender_account", (data: SlipExtraction) => data.sender.account_no, (value: unknown) => { merged.sender.account_no = String(value); }],
+    ["sender_bank", (data: SlipExtraction) => data.sender.bank, (value: unknown) => { merged.sender.bank = String(value); }],
+    ["receiver_name", (data: SlipExtraction) => data.receiver.name, (value: unknown) => { merged.receiver.name = String(value); }],
+    ["receiver_account", (data: SlipExtraction) => data.receiver.account_no, (value: unknown) => { merged.receiver.account_no = String(value); }],
+    ["receiver_bank", (data: SlipExtraction) => data.receiver.bank, (value: unknown) => { merged.receiver.bank = String(value); }],
+  ] as const;
+  for (const [field, read, write] of fields) {
+    const choice = chooseField(field, read);
+    if (!choice) continue;
+    write(choice.value);
+    (merged.confidence as Record<string, number>)[field] = choice.confidence;
+  }
+  const qrReference = qrCandidate.data.transaction.reference_no;
+  if (present(qrReference)) {
+    merged.transaction.reference_no = qrReference;
+    merged.transaction.transaction_id = merged.transaction.transaction_id || qrCandidate.data.transaction.transaction_id || qrReference;
+    merged.confidence.reference_no = qrCandidate.data.confidence.reference_no;
+  }
+  merged.raw_text = [...new Set(candidates.flatMap((candidate) => candidate.data.raw_text || []))];
+  merged.warnings = [...new Set(candidates.flatMap((candidate) => candidate.data.warnings || []))];
+  const missingLabels = [
+    ["วันที่", merged.transaction.date],
+    ["เวลา", merged.transaction.time],
+    ["ธนาคาร", merged.bank.name],
+    ["ชื่อผู้โอน", merged.sender.name],
+    ["ยอดเงิน", merged.transaction.amount],
+    ["ชื่อผู้รับ", merged.receiver.name],
+  ].filter(([, value]) => !present(value)).map(([label]) => label);
+  merged.warnings = merged.warnings.filter((warning) => !warning.startsWith("ข้อมูลที่ยังอ่านไม่ได้และต้องตรวจทาน:"));
+  if (missingLabels.length) merged.warnings.push(`ข้อมูลที่ยังอ่านไม่ได้และต้องตรวจทาน: ${missingLabels.join(", ")}`);
+  if (selected !== qrCandidate && present(qrReference)) {
+    merged.warnings.push("Ref ID คงจาก QR เพื่อเป็นตัวระบุหลักฐานเท่านั้น; ไม่ใช้แทนชื่อหรือยอดเงิน");
+  }
+  return {
+    ...selected,
+    data: merged,
+  };
+}
+
 async function withQrOcrTimeout<T>(operation: Promise<T>, label: string, timeoutMs = QR_OCR_JOB_TIMEOUT_MS): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -99,6 +305,8 @@ import { matchLegalSignalsInText, getLegalSignalDictionaryMetadata } from "@/uti
 import { selectDerivedProcessingSource } from "@/utils/derived-processing-source.mjs";
 import { attachResearchRun, formatReviewCanvasLabel, getResearchArtifacts, getReviewPreviewSource, prepareResearchQueueForPersistence, resolveReviewCanvasSource } from "@/utils/review-preview-source.mjs";
 import { shouldRenderChatSlices } from "@/utils/review-canvas-render-mode.mjs";
+import { assessFieldQuality, fieldQualitySummary } from "@/utils/field-quality-gate.mjs";
+import { sha256Hex } from "@/utils/sha256-browser.mjs";
 import { createArtifactRecord, createResearchRunManifest } from "@/utils/dual-stream-enhancement.mjs";
 
 type ResearchArtifact = ReturnType<typeof createArtifactRecord> & { variant?: string; url?: string };
@@ -305,6 +513,9 @@ export default function MasterEvidenceWorkspace() {
     stitchedIntoItemId?: string;
     stitchingWarnings?: string[];
     embeddedSlips?: EmbeddedSlipRecord[];
+    fieldCrops?: EmbeddedSlipRecord["fieldCrops"];
+    fieldQualitySummary?: EmbeddedSlipRecord["fieldQualitySummary"];
+    processingRunId?: string;
     processingWarnings?: string[];
     processingFile?: File;
     enhancementArtifact?: {
@@ -320,6 +531,7 @@ export default function MasterEvidenceWorkspace() {
     };
   }>>([]);
   const [queuePersistenceReady, setQueuePersistenceReady] = useState(false);
+  const [activeProcessingRunId, setActiveProcessingRunId] = useState<string | null>(null);
   const [selectedItemIndex, setSelectedItemIndex] = useState<number>(0);
   const [selectedSliceIndex, setSelectedSliceIndex] = useState<number>(0);
   const [selectedSlipRecordId, setSelectedSlipRecordId] = useState<string | null>(null);
@@ -345,7 +557,7 @@ export default function MasterEvidenceWorkspace() {
     });
     return matches;
   }, [exactDuplicateGroups, stagedQueue]);
-  const ledgerRecords = useMemo<Array<{ id: string; sourceItemId: string; sha256: string; data: SlipExtraction; isDuplicate: boolean; isConfirmed: boolean; chatPage: string; dossierPage: number | null; source: string; bounds?: { x: number; y: number; width: number; height: number }; crossesSourceBoundary?: boolean; ocrTextBoxes?: Array<{ text: string; confidence: number; bounds: { x: number; y: number; width: number; height: number }; classification?: "slip_evidence" | "chat_context" | "uncertain"; reason?: string; supportsFields?: string[] }>; ocrDiagnosticTrace?: SlipOcrDiagnosticTrace; crop: string; needsReview: boolean; aiProposedFields?: string[] }>>(() => stagedQueue.flatMap((item) => {
+  const ledgerRecords = useMemo<Array<{ id: string; sourceItemId: string; sha256: string; data: SlipExtraction; isDuplicate: boolean; isConfirmed: boolean; chatPage: string; dossierPage: number | null; source: string; bounds?: { x: number; y: number; width: number; height: number }; crossesSourceBoundary?: boolean; ocrTextBoxes?: Array<{ text: string; confidence: number; bounds: { x: number; y: number; width: number; height: number }; classification?: "slip_evidence" | "chat_context" | "uncertain"; reason?: string; supportsFields?: string[] }>; ocrDiagnosticTrace?: SlipOcrDiagnosticTrace; fieldCrops?: EmbeddedSlipRecord["fieldCrops"]; bankEvidence?: EmbeddedSlipRecord["bankEvidence"]; crop: string; needsReview: boolean; aiProposedFields?: string[] }>>(() => stagedQueue.flatMap((item) => {
     if (item.status !== "done") return [];
     const sourceIndex = stagedQueue.findIndex((candidate) => candidate.id === item.id);
     const pagesBefore = stagedQueue.slice(0, sourceIndex).reduce(
@@ -356,7 +568,7 @@ export default function MasterEvidenceWorkspace() {
         id: record.id, sourceItemId: record.sourceItemId, sha256: record.sourceSha256 || item.meta?.sha256 || "", data: record.data, isDuplicate: record.isDuplicate, isConfirmed: !!record.isConfirmed,
         chatPage: `${record.chatPageNumber} / ${record.chatPageCount}`,
         dossierPage: record.dossierPageNumber, source: record.sourceFileName, bounds: record.sourceBounds, crossesSourceBoundary: record.crossesSourceBoundary,
-        crop: record.cropDataUrl, ocrTextBoxes: record.ocrTextBoxes, ocrDiagnosticTrace: record.ocrDiagnosticTrace, needsReview: !record.isConfirmed || !record.data.transaction.amount || !record.data.transaction.reference_no,
+        crop: record.cropDataUrl, ocrTextBoxes: record.ocrTextBoxes, ocrDiagnosticTrace: record.ocrDiagnosticTrace, fieldCrops: record.fieldCrops, bankEvidence: record.bankEvidence, needsReview: !record.isConfirmed || !record.data.transaction.amount || !record.data.transaction.reference_no,
         aiProposedFields: record.aiProposedFields,
       }));
     }
@@ -698,7 +910,7 @@ export default function MasterEvidenceWorkspace() {
     return () => window.clearTimeout(timer);
   }, [queuePersistenceReady, loading, stagedQueue, manifestList]);
 
-  const updateLedgerRecord = (recordId: string, field: "amount" | "reference_no" | "sender_name" | "sender_account" | "receiver_name" | "receiver_account", value: string) => {
+  const updateLedgerRecord = (recordId: string, field: "amount" | "reference_no" | "bank" | "sender_name" | "sender_account" | "receiver_name" | "receiver_account", value: string) => {
     const amountValue = value === "" ? null : Number(value);
     const textValue = value || null;
     const updateData = (data: SlipExtraction): SlipExtraction => {
@@ -726,6 +938,13 @@ export default function MasterEvidenceWorkspace() {
           } : {}),
         };
       }
+      if (field === "bank") {
+        return {
+          ...data,
+          bank: { ...data.bank, name: textValue, confidence: 0 },
+          reviewed_fields: [...new Set([...(data.reviewed_fields ?? []), "bank" as const])],
+        };
+      }
       return { ...data, transaction: field === "amount"
         ? { ...data.transaction, amount: amountValue }
         : { ...data.transaction, reference_no: textValue } };
@@ -741,6 +960,12 @@ export default function MasterEvidenceWorkspace() {
             ...record,
             isConfirmed: false,
             data: updateData(record.data),
+            bankEvidence: field === "bank" ? {
+              ...(record.bankEvidence || { value: null, rawOcr: null, confidence: 0, bounds: null, evidence: { text: false, logo: false } }),
+              reviewedValue: textValue,
+              reviewedAt: new Date().toISOString(),
+              status: "human_reviewed" as const,
+            } : record.bankEvidence,
             needsReview: true,
           } : record),
         };
@@ -813,20 +1038,45 @@ export default function MasterEvidenceWorkspace() {
           fieldCanvas.width = field.bounds.width;
           fieldCanvas.height = field.bounds.height;
           fieldCanvas.getContext("2d")?.drawImage(crop, field.bounds.x, field.bounds.y, field.bounds.width, field.bounds.height, 0, 0, field.bounds.width, field.bounds.height);
+          const absoluteBounds = { x: bounds.x + field.bounds.x, y: bounds.y + field.bounds.y, width: field.bounds.width, height: field.bounds.height };
+          const quality = assessFieldQuality({
+            field: field.field,
+            value: getCandidateFieldValue(candidate.data, field.field),
+            rawOcr: candidate.data.raw_text?.join("\n") || null,
+            confidence: Number((candidate.data.confidence as Record<string, number | undefined>)?.[field.field] || 0),
+            bounds: absoluteBounds,
+            sourceDimensions: { width: sourceWidth, height: bitmap.height },
+          });
+          const cropDataUrl = fieldCanvas.toDataURL("image/png");
           return {
             field: field.field,
             source: "template_region_only" as const,
-            bounds: { x: bounds.x + field.bounds.x, y: bounds.y + field.bounds.y, width: field.bounds.width, height: field.bounds.height },
-            cropDataUrl: fieldCanvas.toDataURL("image/png"),
+            bounds: absoluteBounds,
+            cropDataUrl,
+            cropSha256: undefined,
+            rawOcr: quality.rawOcr,
+            confidence: quality.confidence,
+            alternatives: quality.alternatives,
+            visual_quality: quality.visual_quality,
+            region_quality: quality.region_quality,
+            recognition_quality: quality.recognition_quality,
+            review_status: quality.review_status,
             status: "review" as const,
           };
         });
-        return [{ bounds, cropDataUrl: crop.toDataURL("image/png"), templateId: template?.id || null, fieldCrops, data: {
+        return [{ bounds, cropDataUrl: crop.toDataURL("image/png"), templateId: template?.id || null, fieldCrops, fieldQualitySummary: fieldQualitySummary(fieldCrops), data: {
           ...candidate.data,
           warnings: [...candidate.data.warnings, `${engineLabel} ตรวจพบกรอบสลิปจากภาพต้นฉบับ; หลักฐานภาพและ ${candidate.visual_cues.join(" / ")}; รอตรวจทาน`],
         } }];
       });
       bitmap.close();
+      for (const proposal of proposals) {
+        proposal.fieldCrops = await Promise.all((proposal.fieldCrops || []).map(async (field) => ({
+          ...field,
+          cropSha256: await hashDataUrl(field.cropDataUrl),
+        })));
+        proposal.fieldQualitySummary = fieldQualitySummary(proposal.fieldCrops);
+      }
       // One provider request per detected slip: all template field crops travel
       // together, so quota pressure is bounded and field provenance stays grouped.
       for (let proposalIndex = 0; proposalIndex < proposals.length; proposalIndex += 1) {
@@ -881,7 +1131,7 @@ export default function MasterEvidenceWorkspace() {
           return {
             ...entry, status: "done" as const, error: undefined, meta: entry.meta || result.metadata,
             data: entry.data ? mergeAiSlipProposal(entry.data, proposal.data) as SlipExtraction : proposal.data,
-            sourceBounds: proposal.bounds, cropDataUrl: proposal.cropDataUrl, templateId: proposal.templateId, fieldCrops: proposal.fieldCrops, isConfirmed: false,
+            sourceBounds: proposal.bounds, cropDataUrl: proposal.cropDataUrl, templateId: proposal.templateId, fieldCrops: proposal.fieldCrops, fieldQualitySummary: proposal.fieldQualitySummary, isConfirmed: false,
             aiProposedFields: entry.data
               ? [...new Set([...(entry.aiProposedFields || []), ...getAiFilledFields(entry.data, proposal.data)])]
               : ["all"],
@@ -915,7 +1165,7 @@ export default function MasterEvidenceWorkspace() {
             }
             records[matchIndex] = {
               ...records[matchIndex], data: mergedData,
-              sourceBounds: proposal.bounds, cropDataUrl: proposal.cropDataUrl, templateId: proposal.templateId, fieldCrops: proposal.fieldCrops,
+              sourceBounds: proposal.bounds, cropDataUrl: proposal.cropDataUrl, templateId: proposal.templateId, fieldCrops: proposal.fieldCrops, fieldQualitySummary: proposal.fieldQualitySummary,
               isConfirmed: false, needsReview: true,
               aiProposedFields: [...new Set([...(match.aiProposedFields || []), ...getAiFilledFields(match.data, proposal.data)])],
             };
@@ -935,7 +1185,7 @@ export default function MasterEvidenceWorkspace() {
             sourceSha256: result.metadata!.sha256,
             sourceReferences: [{ sourceItemId: entry.id, fileName: entry.file.name, sha256: result.metadata!.sha256, bounds: proposal.bounds }],
             data: proposal.data, sourceBounds: proposal.bounds, candidateBounds: mapped.candidate.bounds,
-            cropDataUrl: proposal.cropDataUrl, templateId: proposal.templateId, fieldCrops: proposal.fieldCrops,
+            cropDataUrl: proposal.cropDataUrl, templateId: proposal.templateId, fieldCrops: proposal.fieldCrops, fieldQualitySummary: proposal.fieldQualitySummary,
             chatPageNumber: mapped.streamPageNumber, chatPageCount: slices.length,
             dossierPageNumber: 4 + pagesBefore + mapped.sliceIndex,
             isDuplicate: false, isConfirmed: false, needsReview: true,
@@ -1153,11 +1403,15 @@ export default function MasterEvidenceWorkspace() {
   };
 
   // Clear entire staging buffer + OCR cache (allows re-processing same files with new OCR)
-  const clearStagingBuffer = () => {
-    void clearEvidenceQueueSnapshot().catch((error: unknown) => {
+  const clearStagingBuffer = async () => {
+    setQueuePersistenceReady(false);
+    try {
+      await clearEvidenceQueueSnapshot();
+    } catch (error: unknown) {
       setErrorMsg(error instanceof Error ? `ลบคิวที่บันทึกในเครื่องไม่สำเร็จ: ${error.message}` : "ลบคิวที่บันทึกในเครื่องไม่สำเร็จ");
-    });
+    }
     setStagedQueue([]);
+    setActiveProcessingRunId(null);
     setAiScanMessage(null);
     resetSearchSlipScan();
     setManifestList([]);
@@ -1171,6 +1425,7 @@ export default function MasterEvidenceWorkspace() {
     setCurrentStep(1);
     // ล้าง OCR Cache เพื่อให้ประมวลผลไฟล์เดิมใหม่ด้วย Typhoon OCR ได้
     clearAllSlipCache();
+    setQueuePersistenceReady(true);
   };
 
   // Phase 2: Unified Batch Execution (The Cross-Matching Law)
@@ -1181,6 +1436,8 @@ export default function MasterEvidenceWorkspace() {
     }
 
     setLoading(true);
+    const processingRunId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setActiveProcessingRunId(processingRunId);
     setErrorMsg(null);
     setAiScanMessage(null);
     resetSearchSlipScan();
@@ -1208,6 +1465,7 @@ export default function MasterEvidenceWorkspace() {
         status: occurrence.isDuplicate ? "done" as const : item.status === "done" ? "processing" as const : item.status,
         isDuplicate: occurrence.isDuplicate,
         duplicateOfRef: master ? `#${positionsById.get(master.id)} ${master.file.name}` : undefined,
+        processingRunId,
         processingWarnings: occurrence.isDuplicate
           ? [...(item.processingWarnings || []), `ไฟล์ซ้ำแบบ SHA-256 กับ ${master?.file.name || "รายการต้นฉบับ"}; ข้าม OCR และเก็บ occurrence/แฮชไว้ตรวจสอบ`]
           : item.processingWarnings,
@@ -1474,6 +1732,7 @@ export default function MasterEvidenceWorkspace() {
     const ocrFailedPagesByItem = new Map<string, Set<number>>();
     const qrScanDiagnosticsByPage = new Map<string, NonNullable<ChatEvidenceLayerPage["qrScanDiagnostic"]>>();
     const ocrRetryDiagnosticsByItem = new Map<string, Set<string>>();
+    const ocrDiagnosticTraceByItem = new Map<string, SlipOcrDiagnosticTrace>();
     const recordFailedPage = (failures: Map<string, Set<number>>, itemId: string, pageNumber: number) => {
       const pages = failures.get(itemId) || new Set<number>();
       pages.add(pageNumber);
@@ -1536,7 +1795,9 @@ export default function MasterEvidenceWorkspace() {
               diagnostics.add(message);
               ocrRetryDiagnosticsByItem.set(job.itemId, diagnostics);
             },
-          }), "OCR");
+          }), "OCR", job.kind === "SLIP" ? 300_000 : QR_OCR_JOB_TIMEOUT_MS);
+          const trace = ocrCandidates.find((candidate) => candidate.ocrDiagnosticTrace)?.ocrDiagnosticTrace;
+          if (trace) ocrDiagnosticTraceByItem.set(job.itemId, trace);
           return finalizeSlipCandidates(qrCandidates, ocrCandidates);
         } catch (error) {
           recordFailedPage(ocrFailedPagesByItem, job.itemId, job.kind === "CHAT" ? job.slice.sliceIndex : 1);
@@ -1544,7 +1805,24 @@ export default function MasterEvidenceWorkspace() {
           const diagnostics = ocrRetryDiagnosticsByItem.get(job.itemId) || new Set<string>();
           diagnostics.add(`OCR pipeline exception: ${message}`);
           ocrRetryDiagnosticsByItem.set(job.itemId, diagnostics);
-          return finalizeSlipCandidates(qrCandidates, []);
+          const fallbackTrace = {
+            schemaVersion: "digital-evidence.slip-ocr-trace.v2",
+            sourceDimensions: { width: 0, height: 0 },
+            objectBounds: [],
+            qrBounds: qrCandidates.map(({ bounds }) => ({ ...bounds })),
+            attempts: [],
+            regions: [],
+            parserRejectionReasons: [`web-process-ocr-exception:${message}`],
+            imageArtifacts: [],
+          };
+          return finalizeSlipCandidates(qrCandidates, []).map((candidate) => ({
+            ...candidate,
+            ocrDiagnosticTrace: fallbackTrace,
+            data: {
+              ...candidate.data,
+              warnings: [...(candidate.data.warnings || []), `local OCR ไม่ส่งผลกลับจากเว็บ: ${message}`],
+            },
+          }));
         } finally {
           ocrPagesCompleted += 1;
           setBatchProgress({ current: ocrPagesCompleted, total: qrJobPlan.jobs.length, currentFileName: job.fileName, phase: "OCR หน้าไม่ซ้ำทุกไบต์ภายในเครื่อง" });
@@ -1723,7 +2001,12 @@ export default function MasterEvidenceWorkspace() {
       try {
         // TIER 1: Permanent SHA-256 Memory & LocalStorage Cache (0ms)
         const sha256 = await computeFileSha256(targetItem.file);
-        const qrOcrSlip = isSlip ? slipCandidatesByItem.get(targetItem.id)?.[0]?.data || null : null;
+        const currentSlipCandidate = isSlip ? selectBestSlipCandidate(slipCandidatesByItem.get(targetItem.id) || []) : null;
+        const qrOcrSlip = currentSlipCandidate?.data || null;
+        const currentOcrTrace = isSlip
+          ? ocrDiagnosticTraceByItem.get(targetItem.id)
+            || slipCandidatesByItem.get(targetItem.id)?.find((candidate) => candidate.ocrDiagnosticTrace)?.ocrDiagnosticTrace
+          : undefined;
         let slip: SlipExtraction | null = isSlip ? qrOcrSlip || getCachedSlip(sha256) : null;
         let meta: ExtractionMetadata;
         let embeddedSlips: EmbeddedSlipRecord[] | undefined;
@@ -1831,7 +2114,16 @@ export default function MasterEvidenceWorkspace() {
             };
           })).map((record) => retainSenderNameAfterReprocess(targetItem.embeddedSlips || [], record));
           embeddedSlips = retainAiOnlyRecordsAfterReprocess(targetItem.embeddedSlips || [], embeddedSlips, sha256);
-          const embeddedSlip = embeddedSlips[0]?.data;
+          embeddedSlips = await Promise.all(embeddedSlips.map(async (record) => ({
+            ...record,
+            fieldCrops: await buildLocalFieldCrops(record),
+          bankEvidence: await buildBankEvidence(record),
+          })));
+          // The QR candidate is intentionally first in the candidate list, but it only
+          // carries the identifier. Promote the richest OCR candidate for the item-level
+          // result so the UI and diagnostic trace expose the same extraction data.
+          const selectedEmbeddedSlip = selectBestSlipCandidate(embeddedSlips);
+          const embeddedSlip = selectedEmbeddedSlip?.data;
           const ocrSlipData: SlipExtraction | null = embeddedSlip || null;
 
           const senderName = ocrSlipData?.sender?.name || embeddedSlip?.sender?.name || null;
@@ -1922,7 +2214,7 @@ export default function MasterEvidenceWorkspace() {
           : null;
         currentQueue = currentQueue.map((item, idx) =>
           idx === targetIdx
-          ? { ...item, status: isSlip && !slip ? "error" as const : "done" as const, ...(!isSlip || slip ? { extractionVersion: EXTRACTION_VERSION } : {}), ...(isSlip && slip ? { data: { ...slip, warnings: [...slip.warnings, ...ocrWarning, ...(slipQrWarning ? [slipQrWarning] : [])] }, sourceBounds: slipCandidatesByItem.get(targetItem.id)?.[0]?.bounds, ocrTextBoxes: slipCandidatesByItem.get(targetItem.id)?.[0]?.ocrTextBoxes, ocrDiagnosticTrace: slipCandidatesByItem.get(targetItem.id)?.[0]?.ocrDiagnosticTrace, qrScanDiagnostic: qrScanDiagnosticsByPage.get(`${item.id}:slip`), isConfirmed: false } : {}), ...(slipExtractionStatus ? { error: slipExtractionStatus.error } : {}), processingWarnings: [...(item.processingWarnings || []), ...ocrWarning, ...(slipQrWarning ? [slipQrWarning] : []), ...Array.from(qrDecoderDiagnosticsByItem.get(item.id) || []), ...Array.from(ocrRetryDiagnosticsByItem.get(item.id) || []), ...(slipExtractionStatus?.warnings || [])], meta, isDuplicate: false, duplicateOfRef: undefined }
+              ? { ...item, status: isSlip && !slip ? "error" as const : "done" as const, ...(!isSlip || slip ? { extractionVersion: EXTRACTION_VERSION } : {}), ...(isSlip && slip ? { data: { ...slip, warnings: [...slip.warnings, ...ocrWarning, ...(slipQrWarning ? [slipQrWarning] : [])] }, sourceBounds: currentSlipCandidate?.bounds, ocrTextBoxes: currentSlipCandidate?.ocrTextBoxes, ocrDiagnosticTrace: currentOcrTrace || currentSlipCandidate?.ocrDiagnosticTrace, qrScanDiagnostic: qrScanDiagnosticsByPage.get(`${item.id}:slip`), isConfirmed: false } : {}), ...(slipExtractionStatus ? { error: slipExtractionStatus.error } : {}), processingWarnings: [...(item.processingWarnings || []), ...ocrWarning, ...(slipQrWarning ? [slipQrWarning] : []), ...Array.from(qrDecoderDiagnosticsByItem.get(item.id) || []), ...Array.from(ocrRetryDiagnosticsByItem.get(item.id) || []), ...(slipExtractionStatus?.warnings || [])], meta, isDuplicate: false, duplicateOfRef: undefined }
             : item
         );
         // Append to Chain of Custody Hash Manifest
@@ -3894,6 +4186,29 @@ export default function MasterEvidenceWorkspace() {
                             {record.amount !== null ? `฿${record.amount.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "ยอดอ่านไม่ได้"}
                           </span>
                         </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px]">
+                          <label className="text-amber-100" htmlFor={`bank-review-${record.id}`}>ธนาคารที่ผู้ใช้ตรวจ:</label>
+                          <select
+                            id={`bank-review-${record.id}`}
+                            aria-label={`ธนาคารรายการ ${record.id}`}
+                            className="rounded border border-amber-300/30 bg-slate-900/80 px-1.5 py-1 text-amber-100"
+                            value={record.data.bank.name || ""}
+                            onChange={(event) => updateLedgerRecord(record.id, "bank", event.target.value)}
+                          >
+                            <option value="">ไม่ทราบ/รอตรวจ</option>
+                            <option value="ธนาคารทหารไทยธนชาต">ttb · ธนาคารทหารไทยธนชาต</option>
+                            <option value="ธนาคารกรุงไทย">ธนาคารกรุงไทย</option>
+                            <option value="ธนาคารกสิกรไทย">ธนาคารกสิกรไทย</option>
+                            <option value="ธนาคารไทยพาณิชย์">ธนาคารไทยพาณิชย์</option>
+                            <option value="ธนาคารกรุงเทพ">ธนาคารกรุงเทพ</option>
+                            <option value="ธนาคารกรุงศรีอยุธยา">ธนาคารกรุงศรีอยุธยา</option>
+                            <option value="ธนาคารออมสิน">ธนาคารออมสิน</option>
+                          </select>
+                          <span className="text-[9px] text-amber-300">
+                            {record.bankEvidence?.status === "human_reviewed" ? `มนุษย์เลือก · ${record.bankEvidence.reviewedAt || ""}` : "รอตรวจจากหลักฐาน"}
+                          </span>
+                          {record.bankEvidence?.logoCropDataUrl && <img src={record.bankEvidence.logoCropDataUrl} alt="Bank logo evidence crop" className="max-h-10 max-w-24 rounded border border-amber-300/30 bg-white object-contain" />}
+                        </div>
                         {record.ocrProposedRecipientName && (
                           <div className="mt-1 text-[10px] text-amber-100">
                             OCR เสนอ: <strong>{record.ocrProposedRecipientName}</strong> · รอตรวจจากภาพ
@@ -3934,6 +4249,28 @@ export default function MasterEvidenceWorkspace() {
                                     [{box.classification === "slip_evidence" ? "อยู่ในสลิป" : box.classification === "chat_context" ? "บริบทแชท" : box.classification === "uncertain" ? "ไม่แน่ชัด" : "ไม่มีป้ายกำกับ"}] {box.text} · ({box.bounds.x}, {box.bounds.y}, {box.bounds.width}, {box.bounds.height}) · {Math.round(box.confidence * 100)}% · {box.reason || "ไม่มีเหตุผลกำกับ"}
                                   </div>
                                 ))}
+                              </div>
+                            ) : null}
+                            {record.fieldCrops?.length ? (
+                              <div className="mt-2 border-t border-fuchsia-300/20 pt-2">
+                                <div className="font-semibold text-fuchsia-200">Field provenance · {record.fieldCrops.length} fields · ทุกค่ารอตรวจทาน</div>
+                                {record.fieldCrops.map((field) => (
+                                  <div key={`${record.id}-field-${field.field}`} className="mt-1 break-words">
+                                    {field.field}: {field.rawOcr || "ไม่มี raw OCR"} · ({field.bounds.x}, {field.bounds.y}, {field.bounds.width}, {field.bounds.height}) · {Math.round(field.confidence * 100)}% · {field.review_status} · SHA {field.cropSha256?.slice(0, 12) || "ไม่มี"}
+                                    {field.alternatives?.length ? ` · ทางเลือก: ${field.alternatives.join(" / ")}` : ""}
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
+                            {record.bankEvidence ? (
+                              <div className="mt-2 border-t border-amber-300/20 pt-2">
+                                ธนาคาร evidence: {record.bankEvidence.value || "ยังระบุไม่ได้"} · raw OCR: {record.bankEvidence.rawOcr || "ไม่มี"} · ข้อความ {record.bankEvidence.evidence.text ? "พบ" : "ไม่พบ"} · โลโก้ {record.bankEvidence.evidence.logo ? "พบ" : "ยังไม่ได้ยืนยัน"} · {record.bankEvidence.status}
+                                {record.bankEvidence.logoCropDataUrl && (
+                                  <div className="mt-1 flex items-center gap-2">
+                                    <img src={record.bankEvidence.logoCropDataUrl} alt="Bank evidence crop" className="max-h-12 max-w-40 rounded border border-amber-300/30 bg-white object-contain" />
+                                    <span className="font-mono text-[8px]">SHA {record.bankEvidence.logoCropSha256?.slice(0, 16) || "ไม่มี"}</span>
+                                  </div>
+                                )}
                               </div>
                             ) : null}
                             {record.ocrDiagnosticTrace ? (
@@ -5111,7 +5448,26 @@ export default function MasterEvidenceWorkspace() {
                             <td className="p-2 font-mono whitespace-nowrap">
                               {d.transaction.date || "-"} {d.transaction.time || ""}
                             </td>
-                            <td className="p-2 font-semibold text-sky-400 whitespace-nowrap">{[d.sender.bank, d.receiver.bank].filter(Boolean).join(" → ") || d.bank.name || "ต้องตรวจ"}</td>
+                            <td className="p-2 font-semibold text-sky-400 whitespace-nowrap">
+                              <select
+                                aria-label={`ธนาคารรายการ ${idx + 1}`}
+                                className="w-44 bg-slate-900/70 border border-white/15 rounded px-1 py-0.5 text-sky-200"
+                                value={d.bank.name || ""}
+                                onChange={(event) => updateLedgerRecord(record.id, "bank", event.target.value)}
+                              >
+                                <option value="">ต้องตรวจ/ไม่ทราบ</option>
+                                <option value="ธนาคารทหารไทยธนชาต">ttb · ธนาคารทหารไทยธนชาต</option>
+                                <option value="ธนาคารกรุงไทย">ธนาคารกรุงไทย</option>
+                                <option value="ธนาคารกสิกรไทย">ธนาคารกสิกรไทย</option>
+                                <option value="ธนาคารไทยพาณิชย์">ธนาคารไทยพาณิชย์</option>
+                                <option value="ธนาคารกรุงเทพ">ธนาคารกรุงเทพ</option>
+                                <option value="ธนาคารกรุงศรีอยุธยา">ธนาคารกรุงศรีอยุธยา</option>
+                                <option value="ธนาคารออมสิน">ธนาคารออมสิน</option>
+                              </select>
+                              <span className="block text-[9px] text-amber-300">
+                                {record.bankEvidence?.status === "human_reviewed" ? `มนุษย์เลือก · ${record.bankEvidence.reviewedAt || ""}` : record.bankEvidence?.status === "review_required" ? "OCR/โลโก้ยังไม่ยืนยัน" : "เสนอจากหลักฐาน"}
+                              </span>
+                            </td>
                             <td className="p-2 font-mono text-[10px] break-all">
                               <input aria-label={`รหัสอ้างอิงรายการ ${idx + 1}`} className="w-32 bg-slate-900/70 border border-white/15 rounded px-1 py-0.5" value={d.transaction.reference_no || ""} onChange={(event) => updateLedgerRecord(record.id, "reference_no", event.target.value)} placeholder="รอตรวจ/กรอก" />
                             </td>

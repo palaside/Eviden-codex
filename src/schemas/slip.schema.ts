@@ -130,7 +130,7 @@ export const SlipExtractionSchema = z.object({
     .default([]),
 
   reviewed_fields: z
-    .array(z.enum(["amount", "reference_no", "sender_name", "sender_account", "receiver_name", "receiver_account"]))
+    .array(z.enum(["amount", "reference_no", "bank", "sender_name", "sender_account", "receiver_name", "receiver_account"]))
     .optional(),
 
   _fallback_meta: z.object({
