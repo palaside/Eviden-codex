@@ -101,6 +101,7 @@ async function buildLocalFieldCrops(record: EmbeddedSlipRecord): Promise<NonNull
 }
 
 async function buildBankEvidence(record: EmbeddedSlipRecord): Promise<NonNullable<EmbeddedSlipRecord["bankEvidence"]>> {
+  const structuredBank = record.data.bank.name || record.data.sender.bank || record.data.receiver.bank || null;
   const traceLines = (record.ocrDiagnosticTrace?.attempts || [])
     .flatMap((attempt) => attempt.lines || [])
     .map((line) => ({ text: line.text, confidence: line.confidence / 100, bounds: line.bounds }));
@@ -109,12 +110,12 @@ async function buildBankEvidence(record: EmbeddedSlipRecord): Promise<NonNullabl
     .sort((left, right) => right.confidence - left.confidence)[0];
   const knownBank = bankLine?.text.match(/กรุงไทย|krungthai|กสิกรไทย|kasikorn|กรุงเทพ|bangkok\s*bank|ไทยพาณิชย์|\bscb\b|กรุงศรี|krungsri|ทหารไทยธนชาต|ทีเอ็มบีธนชาต|\bttb\b|ออมสิน|\bgsb\b/i);
   const evidence = {
-    value: knownBank ? bankLine?.text.trim() || null : null,
+    value: structuredBank || (knownBank ? bankLine?.text.trim() || null : null),
     rawOcr: bankLine?.text || null,
-    confidence: knownBank ? bankLine?.confidence || 0 : 0,
+    confidence: structuredBank ? Math.max(record.data.bank.confidence || 0, knownBank ? bankLine?.confidence || 0 : 0.8) : knownBank ? bankLine?.confidence || 0 : 0,
     bounds: bankLine?.bounds || null,
-    evidence: { text: Boolean(knownBank), logo: false },
-    status: knownBank ? "pass" : "review_required",
+    evidence: { text: Boolean(structuredBank || knownBank), logo: false },
+    status: structuredBank || knownBank ? "pass" : "review_required",
   } as NonNullable<EmbeddedSlipRecord["bankEvidence"]>;
   if (!record.cropDataUrl) return evidence;
   try {
@@ -318,6 +319,23 @@ type ResearchRunManifest = Omit<ReturnType<typeof createResearchRunManifest>, "s
   };
 };
 
+type FieldQualityAssessment = {
+  rawOcr: string | null;
+  confidence: number;
+  alternatives: string[];
+  ground_truth: string | null;
+  exact_candidate: boolean;
+  certification_status: "exact_candidate" | "review_required";
+  visual_quality: "pass" | "review_required";
+  region_quality: "pass" | "fail" | "review_required";
+  recognition_quality: "pass" | "conflict" | "review_required";
+  review_status: "review_required";
+};
+
+const assessFieldQualityTyped = assessFieldQuality as unknown as (
+  input: Record<string, unknown>,
+) => FieldQualityAssessment;
+
 interface ExtractionMetadata {
   file_name: string;
   mime_type: string;
@@ -496,7 +514,7 @@ export default function MasterEvidenceWorkspace() {
     status: "staged" | "processing" | "done" | "error";
     data?: SlipExtraction;
     sourceBounds?: { x: number; y: number; width: number; height: number };
-    ocrTextBoxes?: Array<{ text: string; confidence: number; bounds: { x: number; y: number; width: number; height: number }; classification?: "slip_evidence" | "chat_context" | "uncertain"; reason?: string; supportsFields?: string[] }>;
+    ocrTextBoxes?: Array<{ text: string; rawOcr?: string | null; confidence: number; bounds: { x: number; y: number; width: number; height: number }; classification?: "slip_evidence" | "chat_context" | "uncertain"; reason?: string; supportsFields?: string[] }>;
     ocrDiagnosticTrace?: SlipOcrDiagnosticTrace;
     meta?: ExtractionMetadata;
     error?: string;
@@ -531,7 +549,7 @@ export default function MasterEvidenceWorkspace() {
     };
   }>>([]);
   const [queuePersistenceReady, setQueuePersistenceReady] = useState(false);
-  const [activeProcessingRunId, setActiveProcessingRunId] = useState<string | null>(null);
+  const [, setActiveProcessingRunId] = useState<string | null>(null);
   const [selectedItemIndex, setSelectedItemIndex] = useState<number>(0);
   const [selectedSliceIndex, setSelectedSliceIndex] = useState<number>(0);
   const [selectedSlipRecordId, setSelectedSlipRecordId] = useState<string | null>(null);
@@ -557,7 +575,7 @@ export default function MasterEvidenceWorkspace() {
     });
     return matches;
   }, [exactDuplicateGroups, stagedQueue]);
-  const ledgerRecords = useMemo<Array<{ id: string; sourceItemId: string; sha256: string; data: SlipExtraction; isDuplicate: boolean; isConfirmed: boolean; chatPage: string; dossierPage: number | null; source: string; bounds?: { x: number; y: number; width: number; height: number }; crossesSourceBoundary?: boolean; ocrTextBoxes?: Array<{ text: string; confidence: number; bounds: { x: number; y: number; width: number; height: number }; classification?: "slip_evidence" | "chat_context" | "uncertain"; reason?: string; supportsFields?: string[] }>; ocrDiagnosticTrace?: SlipOcrDiagnosticTrace; fieldCrops?: EmbeddedSlipRecord["fieldCrops"]; bankEvidence?: EmbeddedSlipRecord["bankEvidence"]; crop: string; needsReview: boolean; aiProposedFields?: string[] }>>(() => stagedQueue.flatMap((item) => {
+  const ledgerRecords = useMemo<Array<{ id: string; sourceItemId: string; sha256: string; data: SlipExtraction; isDuplicate: boolean; isConfirmed: boolean; chatPage: string; dossierPage: number | null; source: string; bounds?: { x: number; y: number; width: number; height: number }; crossesSourceBoundary?: boolean; ocrTextBoxes?: Array<{ text: string; rawOcr?: string | null; confidence: number; bounds: { x: number; y: number; width: number; height: number }; classification?: "slip_evidence" | "chat_context" | "uncertain"; reason?: string; supportsFields?: string[] }>; ocrDiagnosticTrace?: SlipOcrDiagnosticTrace; fieldCrops?: EmbeddedSlipRecord["fieldCrops"]; bankEvidence?: EmbeddedSlipRecord["bankEvidence"]; crop: string; needsReview: boolean; aiProposedFields?: string[] }>>(() => stagedQueue.flatMap((item) => {
     if (item.status !== "done") return [];
     const sourceIndex = stagedQueue.findIndex((candidate) => candidate.id === item.id);
     const pagesBefore = stagedQueue.slice(0, sourceIndex).reduce(
@@ -1033,15 +1051,15 @@ export default function MasterEvidenceWorkspace() {
         context.drawImage(bitmap, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, bounds.width, bounds.height);
         const template = selectSlipTemplate({ bankName: candidate.data.bank.name, rawText: candidate.data.raw_text });
         const fieldPlan = buildTemplateFieldPlan(template, { width: crop.width, height: crop.height });
-        const fieldCrops = Object.values(fieldPlan).map((field) => {
+        const fieldCrops: NonNullable<EmbeddedSlipRecord["fieldCrops"]> = Object.values(fieldPlan).map((field) => {
           const fieldCanvas = document.createElement("canvas");
           fieldCanvas.width = field.bounds.width;
           fieldCanvas.height = field.bounds.height;
           fieldCanvas.getContext("2d")?.drawImage(crop, field.bounds.x, field.bounds.y, field.bounds.width, field.bounds.height, 0, 0, field.bounds.width, field.bounds.height);
           const absoluteBounds = { x: bounds.x + field.bounds.x, y: bounds.y + field.bounds.y, width: field.bounds.width, height: field.bounds.height };
-          const quality = assessFieldQuality({
+          const quality = assessFieldQualityTyped({
             field: field.field,
-            value: getCandidateFieldValue(candidate.data, field.field),
+            value: getCandidateFieldValue(candidate.data, field.field) ?? null,
             rawOcr: candidate.data.raw_text?.join("\n") || null,
             confidence: Number((candidate.data.confidence as Record<string, number | undefined>)?.[field.field] || 0),
             bounds: absoluteBounds,
@@ -1053,18 +1071,21 @@ export default function MasterEvidenceWorkspace() {
             source: "template_region_only" as const,
             bounds: absoluteBounds,
             cropDataUrl,
-            cropSha256: undefined,
-            rawOcr: quality.rawOcr,
+            cropSha256: "",
+            rawOcr: quality.rawOcr ?? null,
             confidence: quality.confidence,
             alternatives: quality.alternatives,
-            visual_quality: quality.visual_quality,
-            region_quality: quality.region_quality,
-            recognition_quality: quality.recognition_quality,
-            review_status: quality.review_status,
+            ground_truth: quality.ground_truth,
+            exact_candidate: quality.exact_candidate,
+            certification_status: quality.certification_status,
+            visual_quality: quality.visual_quality as "pass" | "review_required",
+            region_quality: quality.region_quality as "pass" | "fail" | "review_required",
+            recognition_quality: quality.recognition_quality as "pass" | "conflict" | "review_required",
+            review_status: quality.review_status as "review_required",
             status: "review" as const,
           };
         });
-        return [{ bounds, cropDataUrl: crop.toDataURL("image/png"), templateId: template?.id || null, fieldCrops, fieldQualitySummary: fieldQualitySummary(fieldCrops), data: {
+        return [{ bounds, cropDataUrl: crop.toDataURL("image/png"), templateId: template?.id || null, fieldCrops, fieldQualitySummary: fieldQualitySummary(fieldCrops) as EmbeddedSlipRecord["fieldQualitySummary"], data: {
           ...candidate.data,
           warnings: [...candidate.data.warnings, `${engineLabel} ตรวจพบกรอบสลิปจากภาพต้นฉบับ; หลักฐานภาพและ ${candidate.visual_cues.join(" / ")}; รอตรวจทาน`],
         } }];
@@ -1075,7 +1096,7 @@ export default function MasterEvidenceWorkspace() {
           ...field,
           cropSha256: await hashDataUrl(field.cropDataUrl),
         })));
-        proposal.fieldQualitySummary = fieldQualitySummary(proposal.fieldCrops);
+      proposal.fieldQualitySummary = fieldQualitySummary(proposal.fieldCrops) as EmbeddedSlipRecord["fieldQualitySummary"];
       }
       // One provider request per detected slip: all template field crops travel
       // together, so quota pressure is bounded and field provenance stays grouped.
@@ -1806,7 +1827,7 @@ export default function MasterEvidenceWorkspace() {
           diagnostics.add(`OCR pipeline exception: ${message}`);
           ocrRetryDiagnosticsByItem.set(job.itemId, diagnostics);
           const fallbackTrace = {
-            schemaVersion: "digital-evidence.slip-ocr-trace.v2",
+            schemaVersion: "digital-evidence.slip-ocr-trace.v2" as const,
             sourceDimensions: { width: 0, height: 0 },
             objectBounds: [],
             qrBounds: qrCandidates.map(({ bounds }) => ({ ...bounds })),
@@ -4192,7 +4213,7 @@ export default function MasterEvidenceWorkspace() {
                             id={`bank-review-${record.id}`}
                             aria-label={`ธนาคารรายการ ${record.id}`}
                             className="rounded border border-amber-300/30 bg-slate-900/80 px-1.5 py-1 text-amber-100"
-                            value={record.data.bank.name || ""}
+                            value={record.data.bank?.name || ""}
                             onChange={(event) => updateLedgerRecord(record.id, "bank", event.target.value)}
                           >
                             <option value="">ไม่ทราบ/รอตรวจ</option>
@@ -4256,7 +4277,7 @@ export default function MasterEvidenceWorkspace() {
                                 <div className="font-semibold text-fuchsia-200">Field provenance · {record.fieldCrops.length} fields · ทุกค่ารอตรวจทาน</div>
                                 {record.fieldCrops.map((field) => (
                                   <div key={`${record.id}-field-${field.field}`} className="mt-1 break-words">
-                                    {field.field}: {field.rawOcr || "ไม่มี raw OCR"} · ({field.bounds.x}, {field.bounds.y}, {field.bounds.width}, {field.bounds.height}) · {Math.round(field.confidence * 100)}% · {field.review_status} · SHA {field.cropSha256?.slice(0, 12) || "ไม่มี"}
+                                    {field.field}: {field.rawOcr || "ไม่มี raw OCR"} · ({field.bounds.x}, {field.bounds.y}, {field.bounds.width}, {field.bounds.height}) · {Math.round((field.confidence ?? 0) * 100)}% · {field.review_status} · SHA {field.cropSha256?.slice(0, 12) || "ไม่มี"}
                                     {field.alternatives?.length ? ` · ทางเลือก: ${field.alternatives.join(" / ")}` : ""}
                                   </div>
                                 ))}
@@ -5417,6 +5438,7 @@ export default function MasterEvidenceWorkspace() {
                   <tbody className="divide-y divide-white/5">
                     {ledgerRecords.map((record, idx) => {
                         const d = record.data;
+                        const proposedBankName = d.bank.name || d.sender.bank || d.receiver.bank || "";
                         const sourceItem = stagedQueue.find((item) => item.id === record.sourceItemId);
                         const referenceMatches = referenceMatchOf.get(record.id) || [];
                         const duplicateAudit = duplicateAuditOf.get(record.id);
@@ -5452,7 +5474,7 @@ export default function MasterEvidenceWorkspace() {
                               <select
                                 aria-label={`ธนาคารรายการ ${idx + 1}`}
                                 className="w-44 bg-slate-900/70 border border-white/15 rounded px-1 py-0.5 text-sky-200"
-                                value={d.bank.name || ""}
+                                value={proposedBankName}
                                 onChange={(event) => updateLedgerRecord(record.id, "bank", event.target.value)}
                               >
                                 <option value="">ต้องตรวจ/ไม่ทราบ</option>
@@ -5464,6 +5486,11 @@ export default function MasterEvidenceWorkspace() {
                                 <option value="ธนาคารกรุงศรีอยุธยา">ธนาคารกรุงศรีอยุธยา</option>
                                 <option value="ธนาคารออมสิน">ธนาคารออมสิน</option>
                               </select>
+                              {(d.sender.bank || d.receiver.bank) && (
+                                <span className="block text-[9px] text-cyan-200">
+                                  ต้นทาง: {d.sender.bank || "ไม่พบ"} · ปลายทาง: {d.receiver.bank || "ไม่พบ"}
+                                </span>
+                              )}
                               <span className="block text-[9px] text-amber-300">
                                 {record.bankEvidence?.status === "human_reviewed" ? `มนุษย์เลือก · ${record.bankEvidence.reviewedAt || ""}` : record.bankEvidence?.status === "review_required" ? "OCR/โลโก้ยังไม่ยืนยัน" : "เสนอจากหลักฐาน"}
                               </span>

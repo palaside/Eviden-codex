@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { execFile as nodeExecFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -21,12 +20,6 @@ export function resolveUpscaylExecutable(env = process.env) {
 export function buildUpscaylCommand({ executable, inputPath, outputPath, scale = 2, model = "upscayl-standard-4x", modelDir }) {
   if (!ALLOWED_SCALES.has(scale)) throw new RangeError("Upscayl scale must be 2 or 4");
   return [executable, "-i", inputPath, "-o", outputPath, "-s", String(scale), "-m", modelDir || "models", "-n", model, "-f", "png"];
-}
-
-async function sha256(filePath) {
-  const digest = crypto.createHash("sha256");
-  digest.update(await fs.readFile(filePath));
-  return digest.digest("hex");
 }
 
 function dimensions(buffer) {

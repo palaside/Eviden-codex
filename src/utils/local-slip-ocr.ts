@@ -2,7 +2,7 @@ import { createWorker, PSM } from "tesseract.js";
 import type { LocalSlipCandidate } from "@/utils/local-qr-extractor";
 import { findRecipientName, findRecipientNameWithLine, findSenderName, findSlipOcrRegions, toSlipExtraction } from "@/utils/slip-ocr-analysis";
 import { filterTextOnlySlipRegionsForJob } from "@/utils/ocr-analysis-policy.mjs";
-import { getQrAnchoredOcrCrop, getRecipientRetryCropBounds, getSoloSlipOcrCrop, type PixelBounds } from "@/utils/qr-anchored-ocr-crop";
+import { getQrAnchoredOcrCrop, getRecipientRetryCropBounds, type PixelBounds } from "@/utils/qr-anchored-ocr-crop";
 import { enhanceOcrPixels, getOcrEnhancementScale } from "@/utils/enhance-for-ocr.mjs";
 import { segmentOcrTextLines } from "@/utils/two-layer-segmentation.mjs";
 import { createColorSeparatedOcrCanvas, createMorphologicalSlipOcrCanvas, detectChatVisualRegions, findQrSlipObjectBounds } from "@/utils/chat-visual-contours.mjs";
@@ -192,7 +192,7 @@ export async function extractSlipCandidatesWithLocalOcr(
     onRetryDiagnostic?: (message: string) => void;
   },
 ): Promise<LocalSlipCandidate[]> {
-  let diagnosticAttempts: SlipOcrAttemptTrace[] = [];
+  const diagnosticAttempts: SlipOcrAttemptTrace[] = [];
   let lastDiagnosticTrace: SlipOcrDiagnosticTrace | null = null;
   try {
     const worker = await getLocalOcrWorker(workerSlot);

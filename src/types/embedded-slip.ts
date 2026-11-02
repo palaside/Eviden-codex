@@ -38,6 +38,7 @@ export interface EmbeddedSlipRecord {
   cropDataUrl: string;
   ocrTextBoxes?: Array<{
     text: string;
+    rawOcr?: string | null;
     confidence: number;
     bounds: { x: number; y: number; width: number; height: number };
     classification?: "slip_evidence" | "chat_context" | "uncertain";
@@ -63,6 +64,9 @@ export interface EmbeddedSlipRecord {
     rawOcr?: string | null;
     confidence?: number;
     alternatives?: string[];
+    ground_truth?: string | null;
+    exact_candidate?: boolean;
+    certification_status?: "exact_candidate" | "review_required";
     visual_quality?: "pass" | "review_required";
     region_quality?: "pass" | "fail" | "review_required";
     recognition_quality?: "pass" | "conflict" | "review_required";
@@ -74,6 +78,8 @@ export interface EmbeddedSlipRecord {
     region_quality: "pass" | "review_required";
     recognition_quality: "pass" | "conflict" | "review_required";
     review_status: "review_required";
+    exact_candidate?: boolean;
+    certification_status?: "exact_candidate" | "review_required";
   };
   bankEvidence?: {
     value: string | null;

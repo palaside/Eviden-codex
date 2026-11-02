@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const { createServiceOptions, cleanupStaleDaemonArtifacts } = require("./install-enterprise-node-service.cjs");

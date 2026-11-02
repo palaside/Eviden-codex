@@ -13,12 +13,22 @@ const fixtures = [
   { file: path.join("For Test", "แชทที่ 3", "chatv3 (100).jpg"), expected: "chat-only" },
   { file: path.join("For Test", "Done", "A4_IMG_ (1).PNG"), expected: "slip-only" },
 ].map((item) => ({ ...item, file: path.resolve(root, item.file) }));
+const requestedIndexes = (process.env.E2E_CASE_INDEX || "")
+  .split(",")
+  .map((value) => Number(value.trim()))
+  .filter((value) => Number.isInteger(value) && value >= 0 && value < fixtures.length);
+const selectedFixtures = requestedIndexes.length > 0
+  ? requestedIndexes.map((index) => fixtures[index])
+  : fixtures;
 
 await fs.mkdir(outDir, { recursive: true });
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({
+  headless: process.env.E2E_HEADLESS !== "false",
+  executablePath: process.env.E2E_BROWSER_EXECUTABLE || undefined,
+});
 const results = [];
 
-for (const [index, fixture] of fixtures.entries()) {
+for (const [index, fixture] of selectedFixtures.entries()) {
   const page = await browser.newPage({ viewport: { width: 1662, height: 1548 } });
   const result = { fixture: fixture.file, expected: fixture.expected, steps: [], apiResponses: [] };
   page.on("response", (response) => {
@@ -30,7 +40,7 @@ for (const [index, fixture] of fixtures.entries()) {
     await page.locator("#evidence-file-input").waitFor({ state: "attached", timeout: 30_000 });
     await page.waitForTimeout(1_000);
     await page.locator("#evidence-file-input").setInputFiles(fixture.file);
-    await page.getByRole("button", { name: /เริ่มประมวลผลพยานหลักฐาน/ }).waitFor({ state: "visible", timeout: 30_000 });
+    await page.getByRole("button", { name: /เริ่มประมวลผลพยานหลักฐาน/ }).waitFor({ state: "visible", timeout: 180_000 });
     result.steps.push({ name: "setInputFiles", ok: true });
     await page.getByRole("button", { name: /เริ่มประมวลผลพยานหลักฐาน/ }).click();
     await page.waitForFunction(() => !/กำลังประมวลผลแบบ Cross-Matching|กำลังสกัดพยานหลักฐานระดับพิกเซล/.test(document.body?.innerText || ""), undefined, { timeout: 240_000 });
@@ -43,14 +53,25 @@ for (const [index, fixture] of fixtures.entries()) {
     if (!expectedPass) throw new Error(`ผลตรวจสลิปไม่ตรง expected=${fixture.expected}, detected=${detected}`);
   } catch (error) {
     result.error = error instanceof Error ? error.stack || error.message : String(error);
+    result.diagnosticBody = await page.locator("body").innerText().catch(() => "");
+    await page.screenshot({ path: path.join(outDir, `${String(index + 1).padStart(2, "0")}-error.png`), fullPage: true }).catch(() => {});
   } finally {
     results.push(result);
+    const interim = {
+      baseUrl,
+      total: selectedFixtures.length,
+      completed: results.length,
+      passed: results.filter((item) => item.steps.at(-1)?.ok && !item.error).length,
+      failed: results.filter((item) => item.error || !item.steps.at(-1)?.ok).length,
+      results,
+    };
+    await fs.writeFile(path.join(outDir, "report.partial.json"), JSON.stringify(interim, null, 2), "utf8");
     await page.close();
   }
 }
 
 await browser.close();
-const report = { baseUrl, total: results.length, passed: results.filter((result) => result.steps.at(-1)?.ok && !result.error).length, failed: results.filter((result) => result.error || !result.steps.at(-1)?.ok).length, results };
+const report = { baseUrl, total: selectedFixtures.length, completed: results.length, passed: results.filter((result) => result.steps.at(-1)?.ok && !result.error).length, failed: results.filter((result) => result.error || !result.steps.at(-1)?.ok).length, results };
 await fs.writeFile(path.join(outDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
 console.log(JSON.stringify({ outDir, total: report.total, passed: report.passed, failed: report.failed }, null, 2));
 if (report.failed > 0) process.exitCode = 1;

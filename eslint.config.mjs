@@ -14,6 +14,13 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
     "public/ocr/**",
+    // Local browser/E2E artifacts are not application source and may contain
+    // third-party extension bundles that ESLint cannot process reliably.
+    ".e2e-chrome-profile/**",
+    ".playwright-browsers-task5/**",
+    "test-results/**",
+    "For Test Results/**",
+    "build-output*/**",
   ]),
 ]);
 

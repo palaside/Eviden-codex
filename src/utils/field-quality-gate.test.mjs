@@ -17,5 +17,33 @@ test("preserves conflicting OCR alternatives instead of selecting one", () => {
 
 test("summary remains review-only even when every field is readable", () => {
   const field = assessFieldQuality({ field: "amount", value: "800", confidence: 0.95, bounds: { x: 1, y: 1, width: 40, height: 20 }, sourceDimensions: { width: 100, height: 100 } });
-  assert.deepEqual(fieldQualitySummary([field]), { visual_quality: "pass", region_quality: "pass", recognition_quality: "pass", review_status: "review_required" });
+  assert.deepEqual(fieldQualitySummary([field]), { visual_quality: "pass", region_quality: "pass", recognition_quality: "pass", review_status: "review_required", exact_candidate: false, certification_status: "review_required" });
+});
+
+test("marks a field as an exact candidate only with matching ground truth", () => {
+  const result = assessFieldQuality({
+    field: "amount",
+    value: "800.00",
+    groundTruth: "800.00",
+    confidence: 0.95,
+    bounds: { x: 1, y: 1, width: 40, height: 20 },
+    sourceDimensions: { width: 100, height: 100 },
+  });
+  assert.equal(result.exact_candidate, true);
+  assert.equal(result.certification_status, "exact_candidate");
+  assert.equal(result.review_status, "review_required");
+});
+
+test("never marks OCR exact without ground truth or when alternatives conflict", () => {
+  const result = assessFieldQuality({
+    field: "receiver_name",
+    value: "จิณห์",
+    groundTruth: "จิณห์",
+    alternatives: ["จิณห์", "วิณห์"],
+    confidence: 0.99,
+    bounds: { x: 1, y: 1, width: 40, height: 20 },
+    sourceDimensions: { width: 100, height: 100 },
+  });
+  assert.equal(result.exact_candidate, false);
+  assert.equal(result.certification_status, "review_required");
 });
