@@ -6153,11 +6153,11 @@ export default function MasterEvidenceWorkspace() {
                   ส่วนที่ ๒: รายการบทกฎหมายที่อาจเกี่ยวข้อง (LEGAL REFERENCES)
                   =============================================================== */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {/* ฝั่งที่ ๑: บทกฎหมายอาญาที่อาจเกี่ยวข้อง */}
+                  {/* ฝั่งที่ ๑: บทกฎหมายอาญาอ้างอิงทั่วไป (ไม่ใช่ข้อความจากหลักฐาน) */}
                 <div className="p-4 rounded-xl bg-slate-900/70 border border-red-500/35 flex flex-col gap-2.5 shadow-lg">
                   <div className="flex items-center justify-between pb-1 border-b border-red-500/20">
                     <span className="font-bold text-red-400 text-sm flex items-center gap-1.5">
-                      ⚖️ 1. บทกฎหมายอาญาที่อาจเกี่ยวข้อง (Criminal Law References)
+                        ⚖️ 1. บทกฎหมายอาญาอ้างอิงทั่วไป (Criminal Law References · ไม่ใช่ข้อความจากหลักฐาน)
                     </span>
                     <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-red-500/20 text-red-300 border border-red-500/30">
                       LEGAL REFERENCES
@@ -6194,11 +6194,11 @@ export default function MasterEvidenceWorkspace() {
                   </div>
                 </div>
 
-                {/* ฝั่งที่ ๒: บทกฎหมายแพ่งที่อาจเกี่ยวข้อง */}
+                  {/* ฝั่งที่ ๒: บทกฎหมายแพ่งอ้างอิงทั่วไป (ไม่ใช่ข้อความจากหลักฐาน) */}
                 <div className="p-4 rounded-xl bg-slate-900/70 border border-sky-500/35 flex flex-col gap-2.5 shadow-lg">
                   <div className="flex items-center justify-between pb-1 border-b border-sky-500/20">
                     <span className="font-bold text-sky-400 text-sm flex items-center gap-1.5">
-                      📑 2. บทกฎหมายแพ่งที่อาจเกี่ยวข้อง (Civil Law References)
+                        📑 2. บทกฎหมายแพ่งอ้างอิงทั่วไป (Civil Law References · ไม่ใช่ข้อความจากหลักฐาน)
                     </span>
                     <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30">
                       LEGAL REFERENCES
@@ -6246,7 +6246,7 @@ export default function MasterEvidenceWorkspace() {
                       📋 ตารางเชื่อมโยงข้อมูลและเอกสารอ้างอิง ๔ คอลัมน์ (Evidence Reference Mapping)
                     </h4>
                     <p className="text-[11px] text-slate-400">
-                      ตารางเชื่อมโยงข้อความที่ตรวจพบกับหน้า PDF และบทกฎหมายที่ควรพิจารณา
+                      ตารางนี้เท่านั้นที่แสดงข้อความจาก OCR ที่ตรวจพบจริง; บทกฎหมายด้านบนเป็นเพียง reference ไม่ใช่ข้อความจากหลักฐาน
                     </p>
                   </div>
 
