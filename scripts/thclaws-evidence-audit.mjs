@@ -11,6 +11,26 @@ const rel = (p) => path.relative(root, p).replaceAll('\\', '/');
 const exists = async (p) => { try { await fs.access(p); return true; } catch { return false; } };
 const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
 
+async function probeLargeJson(file, size) {
+  const handle = await fs.open(file, 'r');
+  try {
+    const sampleSize = Math.min(128 * 1024, size);
+    const head = Buffer.alloc(sampleSize);
+    const tail = Buffer.alloc(sampleSize);
+    const headRead = await handle.read(head, 0, sampleSize, 0);
+    const tailRead = await handle.read(tail, 0, sampleSize, Math.max(0, size - sampleSize));
+    const sample = `${head.subarray(0, headRead.bytesRead).toString('utf8')}\n${tail.subarray(0, tailRead.bytesRead).toString('utf8')}`;
+    const hints = [...new Set([
+      ...[...sample.matchAll(/"(?:status|overallStatus|reviewStatus)"\s*:\s*"([^"]+)"/gi)].map((match) => match[1]),
+      ...(sample.match(/"failed"\s*:\s*(\d+)/i)?.[1] ? [`failed=${sample.match(/"failed"\s*:\s*(\d+)/i)[1]}`] : []),
+      ...(sample.match(/"processed"\s*:\s*(\d+)/i)?.[1] ? [`processed=${sample.match(/"processed"\s*:\s*(\d+)/i)[1]}`] : []),
+    ])];
+    return { path: rel(file), bytes: size, classification: 'not_parsed_due_size', statusHints: hints };
+  } finally {
+    await handle.close();
+  }
+}
+
 async function walk(dir, predicate, limit = 5000, maxDepth = 8) {
   const result = [];
   async function visit(current, depth) {
@@ -48,6 +68,7 @@ async function main() {
   const parseable = [];
   const unreadable = [];
   const skippedLarge = [];
+  const largeFileInventory = [];
   const statusCounts = {};
   const traceClassCounts = {};
   const traceClassSamples = {};
@@ -55,7 +76,12 @@ async function main() {
   for (const file of traceFiles) {
     try {
       const stat = await fs.stat(file);
-      if (stat.size > 2_000_000) { skippedLarge.push(file); continue; }
+      if (stat.size > 2_000_000) {
+        skippedLarge.push(file);
+        try { largeFileInventory.push(await probeLargeJson(file, stat.size)); }
+        catch { largeFileInventory.push({ path: rel(file), bytes: stat.size, classification: 'not_readable_due_size', statusHints: [] }); }
+        continue;
+      }
       const raw = await fs.readFile(file, 'utf8');
       const data = JSON.parse(raw);
       parseable.push(file);
@@ -116,7 +142,7 @@ async function main() {
     schemaVersion: '1.0.0', auditId, createdAt: new Date().toISOString(), readOnly: true,
     scope: { root, input: rel(inputPath), sourceFiles: sourceFiles.map(rel), traceFiles: traceFiles.map(rel) },
     input: { exists: inputExists, sha256: inputHash }, checks, legalSourceAudit,
-    traceInventory: { jsonFiles: traceFiles.length, parseable: parseable.length, unreadable: unreadable.length, skippedLarge: skippedLarge.length, statusCounts, traceClassCounts, traceClassSamples, sampleFiles: evidence(parseable) },
+    traceInventory: { jsonFiles: traceFiles.length, parseable: parseable.length, unreadable: unreadable.length, skippedLarge: skippedLarge.length, largeFileInventory, statusCounts, traceClassCounts, traceClassSamples, sampleFiles: evidence(parseable) },
     mcp: { configured: await exists(path.join(root, '.thclaws', 'mcp.json')), mode: 'read-only local stdio', externalCalls: 0 },
     e2e: { status: 'not_run_by_audit_script', reason: 'E2E ต้องใช้ browser runtime และตรวจ UI แยกจาก static audit' },
     notes: ['ไม่แก้ source code', 'ไม่แก้หรือเขียนทับ trace เดิม', 'ผล observed ไม่ใช่ข้อพิสูจน์ว่า E2E ผ่าน']
