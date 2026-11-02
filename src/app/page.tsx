@@ -6178,6 +6178,9 @@ export default function MasterEvidenceWorkspace() {
                       LEGAL REFERENCES
                     </span>
                   </div>
+                  <div className="rounded border border-amber-300/20 bg-amber-950/20 px-2.5 py-1.5 text-[10px] text-amber-200">
+                    แหล่งข้อมูล: RAW local reference · สถานะ current_unverified · ยังไม่ได้ผูกฉบับราชกิจจานุเบกษารายมาตรา
+                  </div>
 
                   <div className="space-y-2 mt-1">
                     <div className="p-2.5 rounded-lg bg-black/40 border border-white/5 flex flex-col gap-1">
@@ -6218,6 +6221,9 @@ export default function MasterEvidenceWorkspace() {
                     <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30">
                       LEGAL REFERENCES
                     </span>
+                  </div>
+                  <div className="rounded border border-amber-300/20 bg-amber-950/20 px-2.5 py-1.5 text-[10px] text-amber-200">
+                    แหล่งข้อมูล: RAW local reference · สถานะ current_unverified · ยังไม่ได้ผูกฉบับราชกิจจานุเบกษารายมาตรา
                   </div>
 
                   <div className="space-y-2 mt-1">
