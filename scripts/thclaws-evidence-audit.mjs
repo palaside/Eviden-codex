@@ -49,6 +49,8 @@ async function main() {
   const unreadable = [];
   const skippedLarge = [];
   const statusCounts = {};
+  const traceClassCounts = {};
+  const traceClassSamples = {};
   const signalFiles = [];
   for (const file of traceFiles) {
     try {
@@ -59,6 +61,16 @@ async function main() {
       parseable.push(file);
       const status = data?.status || data?.overallStatus || data?.reviewStatus || data?.result?.status || 'unknown';
       statusCounts[status] = (statusCounts[status] || 0) + 1;
+      const statusText = String(status).toLowerCase();
+      const processed = Number.isFinite(Number(data?.processed)) ? Number(data.processed) : null;
+      const failed = Number.isFinite(Number(data?.failed)) ? Number(data.failed) : null;
+      let traceClass = 'unknown';
+      if (/(partial-report|partial)/i.test(path.basename(file))) traceClass = 'partial_or_incomplete';
+      else if (failed !== null && failed > 0 || /error|blocked|fail|denied|timeout|429/.test(statusText)) traceClass = 'failed_or_blocked';
+      else if (processed !== null && processed > 0 && (failed === null || failed === 0) && (Array.isArray(data?.results) || /success|review_only|captured|complete|pass/.test(statusText))) traceClass = 'completed_or_review_only';
+      traceClassCounts[traceClass] = (traceClassCounts[traceClass] || 0) + 1;
+      if (!traceClassSamples[traceClass]) traceClassSamples[traceClass] = [];
+      if (traceClassSamples[traceClass].length < 10) traceClassSamples[traceClass].push(rel(file));
       if (containsAny(raw, ['ocr', 'crop', 'candidate', 'review_required', 'trace'])) signalFiles.push(file);
     } catch { unreadable.push(file); }
   }
@@ -104,7 +116,7 @@ async function main() {
     schemaVersion: '1.0.0', auditId, createdAt: new Date().toISOString(), readOnly: true,
     scope: { root, input: rel(inputPath), sourceFiles: sourceFiles.map(rel), traceFiles: traceFiles.map(rel) },
     input: { exists: inputExists, sha256: inputHash }, checks, legalSourceAudit,
-    traceInventory: { jsonFiles: traceFiles.length, parseable: parseable.length, unreadable: unreadable.length, skippedLarge: skippedLarge.length, statusCounts, sampleFiles: evidence(parseable) },
+    traceInventory: { jsonFiles: traceFiles.length, parseable: parseable.length, unreadable: unreadable.length, skippedLarge: skippedLarge.length, statusCounts, traceClassCounts, traceClassSamples, sampleFiles: evidence(parseable) },
     mcp: { configured: await exists(path.join(root, '.thclaws', 'mcp.json')), mode: 'read-only local stdio', externalCalls: 0 },
     e2e: { status: 'not_run_by_audit_script', reason: 'E2E ต้องใช้ browser runtime และตรวจ UI แยกจาก static audit' },
     notes: ['ไม่แก้ source code', 'ไม่แก้หรือเขียนทับ trace เดิม', 'ผล observed ไม่ใช่ข้อพิสูจน์ว่า E2E ผ่าน']
