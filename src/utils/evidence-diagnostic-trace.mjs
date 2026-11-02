@@ -4,6 +4,13 @@ function stripMaskPreview(trace) {
   return { ...diagnostic, maskPreviewsOmitted: Boolean(maskPreviews) };
 }
 
+function isRoleLabelOnly(field, text) {
+  const value = String(text || "").replace(/[:：\-\s]/gu, "").trim();
+  if (field === "receiver_name") return /^(ไปยัง|ผู้รับ|ผู้รับเงิน|บัญชีผู้รับ)$/u.test(value);
+  if (field === "sender_name") return /^(จาก|ผู้โอน|ผู้โอนเงิน|บัญชีผู้โอน)$/u.test(value);
+  return false;
+}
+
 function getFieldConflicts(candidate) {
   const warnings = candidate.data?.warnings || [];
   const conflicts = [];
@@ -39,6 +46,7 @@ function candidateTrace(candidate, source) {
   const fieldEvidence = {};
   for (const box of candidate.ocrTextBoxes || []) {
     for (const field of box.supportsFields || []) {
+      if (isRoleLabelOnly(field, box.text)) continue;
       const current = fieldEvidence[field];
       if (!current || box.confidence > current.confidence) {
         fieldEvidence[field] = {

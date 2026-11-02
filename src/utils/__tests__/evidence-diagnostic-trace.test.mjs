@@ -66,3 +66,20 @@ test("legacy diagnostic-only traces do not claim production scan coverage", () =
   assert.equal(result.statistics.qrInputsDecoded, 0);
   assert.equal(result.statistics.qrLegacyDiagnosticInputs, 1);
 });
+
+test("does not export role labels as sender or receiver name evidence", () => {
+  const result = buildEvidenceDiagnosticTrace([{
+    id: "role-labels",
+    category: "SLIP",
+    meta: { sha256: "source-sha" },
+    data: { sender: { name: "ผู้โอนจริง" }, receiver: { name: "ผู้รับจริง" }, transaction: {} },
+    ocrTextBoxes: [
+      { text: "ไปยัง", confidence: 0.95, bounds: { x: 1, y: 1, width: 10, height: 5 }, supportsFields: ["receiver_name"] },
+      { text: "ผู้รับจริง", confidence: 0.9, bounds: { x: 1, y: 8, width: 40, height: 5 }, supportsFields: ["receiver_name"] },
+      { text: "จาก", confidence: 0.95, bounds: { x: 1, y: 16, width: 10, height: 5 }, supportsFields: ["sender_name"] },
+    ],
+  }], []);
+  const evidence = result.items[0].candidates[0].fieldEvidence;
+  assert.equal(evidence.receiver_name.value, "ผู้รับจริง");
+  assert.equal(evidence.sender_name, undefined);
+});
