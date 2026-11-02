@@ -20,6 +20,14 @@ test("summary remains review-only even when every field is readable", () => {
   assert.deepEqual(fieldQualitySummary([field]), { visual_quality: "pass", region_quality: "pass", recognition_quality: "pass", review_status: "review_required", exact_candidate: false, certification_status: "review_required" });
 });
 
+test("keeps summary review-required when a required field is absent", () => {
+  const field = assessFieldQuality({ field: "amount", value: "800", confidence: 0.95, bounds: { x: 1, y: 1, width: 40, height: 20 }, sourceDimensions: { width: 100, height: 100 } });
+  const summary = fieldQualitySummary([field], { requiredFields: ["amount", "bank"] });
+  assert.equal(summary.region_quality, "review_required");
+  assert.equal(summary.recognition_quality, "review_required");
+  assert.equal(summary.certification_status, "review_required");
+});
+
 test("marks a field as an exact candidate only with matching ground truth", () => {
   const result = assessFieldQuality({
     field: "amount",

@@ -39,12 +39,23 @@ import { explainSlipOcrRegionRejection } from "@/utils/slip-ocr-trace.mjs";
 import { finalizeSlipCandidates } from "@/utils/finalize-slip-candidates.mjs";
 import { buildSlipExtractionStatus, buildSlipQrWarning } from "@/utils/slip-extraction-status.mjs";
 import { selectSlipTemplate } from "@/utils/slip-template-registry.mjs";
-import { buildTemplateFieldPlan } from "@/utils/template-field-crops.mjs";
+import { buildTemplateFieldPlan, mergeTemplateAndOcrFields, toCanonicalFieldName } from "@/utils/template-field-crops.mjs";
 import { mergeGeminiFieldBundle } from "@/utils/gemini-field-bundle.mjs";
 import { fetchWithTimeout } from "@/utils/fetch-with-timeout.mjs";
 
 const QR_OCR_JOB_TIMEOUT_MS = 120_000;
 const DERIVED_IMAGE_REQUEST_TIMEOUT_MS = 45_000;
+const REQUIRED_REVIEW_FIELDS = [
+  "amount",
+  "senderName",
+  "senderAccount",
+  "receiverName",
+  "receiverAccount",
+  "transactionDate",
+  "transactionTime",
+  "referenceNo",
+  "bank",
+];
 
 async function hashDataUrl(dataUrl: string): Promise<string> {
   const comma = dataUrl.indexOf(",");
@@ -54,46 +65,58 @@ async function hashDataUrl(dataUrl: string): Promise<string> {
 }
 
 async function buildLocalFieldCrops(record: EmbeddedSlipRecord): Promise<NonNullable<EmbeddedSlipRecord["fieldCrops"]>> {
-  if (!record.cropDataUrl || !record.ocrTextBoxes?.length) return [];
+  if (!record.cropDataUrl) return [];
   const image = new Image();
   image.src = record.cropDataUrl;
   await new Promise<void>((resolve, reject) => {
     image.onload = () => resolve();
     image.onerror = () => reject(new Error("โหลด crop เพื่อสร้าง field provenance ไม่สำเร็จ"));
   });
-  type LocalOcrBox = NonNullable<EmbeddedSlipRecord["ocrTextBoxes"]>[number];
-  const fields = new Map<string, LocalOcrBox[]>();
-  for (const box of record.ocrTextBoxes) {
-    for (const field of box.supportsFields || []) {
-      fields.set(field, [...(fields.get(field) || []), box]);
-    }
-  }
+  const template = selectSlipTemplate({ bankName: record.data.bank.name, rawText: record.data.raw_text });
+  const plan = buildTemplateFieldPlan(template, { width: image.naturalWidth, height: image.naturalHeight });
+  const fields = mergeTemplateAndOcrFields(plan, record.ocrTextBoxes || []);
   const result: NonNullable<EmbeddedSlipRecord["fieldCrops"]> = [];
-  for (const [field, boxes] of fields) {
-    const box = [...boxes].sort((left, right) => right.confidence - left.confidence)[0];
-    const x = Math.max(0, Math.floor(box.bounds.x));
-    const y = Math.max(0, Math.floor(box.bounds.y));
-    const width = Math.min(image.naturalWidth - x, Math.max(1, Math.ceil(box.bounds.width)));
-    const height = Math.min(image.naturalHeight - y, Math.max(1, Math.ceil(box.bounds.height)));
+  for (const entry of fields) {
+    const box = entry.ocrBox;
+    const field = entry.field;
+    const x = Math.max(0, Math.floor(entry.bounds.x));
+    const y = Math.max(0, Math.floor(entry.bounds.y));
+    const width = Math.min(image.naturalWidth - x, Math.max(1, Math.ceil(entry.bounds.width)));
+    const height = Math.min(image.naturalHeight - y, Math.max(1, Math.ceil(entry.bounds.height)));
     if (width <= 0 || height <= 0) continue;
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     canvas.getContext("2d")?.drawImage(image, x, y, width, height, 0, 0, width, height);
     const cropDataUrl = canvas.toDataURL("image/png");
+    const canonicalField = toCanonicalFieldName(field);
+    const rawOcr = box?.rawOcr || box?.text || null;
+    const confidence = Number(box?.confidence || 0);
+    const quality = assessFieldQualityTyped({
+      field,
+      value: getCandidateFieldValue(record.data, canonicalField),
+      rawOcr,
+      confidence,
+      bounds: { x, y, width, height },
+      sourceDimensions: { width: image.naturalWidth, height: image.naturalHeight },
+      alternatives: entry.alternatives.map((candidate) => candidate.rawOcr || candidate.text).filter(Boolean),
+    });
     result.push({
       field,
       source: "template_region_only",
       bounds: { x, y, width, height },
       cropDataUrl,
       cropSha256: await hashDataUrl(cropDataUrl),
-      rawOcr: box.rawOcr || box.text,
-      confidence: box.confidence,
-      alternatives: [...new Set(boxes.map((candidate) => candidate.rawOcr || candidate.text).filter((value) => value && value !== (box.rawOcr || box.text)))],
-      visual_quality: "pass",
-      region_quality: "pass",
-      recognition_quality: box.confidence >= 0.9 ? "pass" : "review_required",
-      review_status: "review_required",
+      rawOcr,
+      confidence,
+      alternatives: [...new Set(entry.alternatives.map((candidate) => candidate.rawOcr || candidate.text).filter(Boolean))],
+      ground_truth: quality.ground_truth,
+      exact_candidate: quality.exact_candidate,
+      certification_status: quality.certification_status,
+      visual_quality: quality.visual_quality,
+      region_quality: quality.region_quality,
+      recognition_quality: quality.recognition_quality,
+      review_status: quality.review_status,
       status: "review",
     });
   }
@@ -1069,9 +1092,9 @@ export default function MasterEvidenceWorkspace() {
           const absoluteBounds = { x: bounds.x + field.bounds.x, y: bounds.y + field.bounds.y, width: field.bounds.width, height: field.bounds.height };
           const quality = assessFieldQualityTyped({
             field: field.field,
-            value: getCandidateFieldValue(candidate.data, field.field) ?? null,
+            value: getCandidateFieldValue(candidate.data, toCanonicalFieldName(field.field)) ?? null,
             rawOcr: candidate.data.raw_text?.join("\n") || null,
-            confidence: Number((candidate.data.confidence as Record<string, number | undefined>)?.[field.field] || 0),
+            confidence: Number((candidate.data.confidence as Record<string, number | undefined>)?.[toCanonicalFieldName(field.field)] || 0),
             bounds: absoluteBounds,
             sourceDimensions: { width: sourceWidth, height: bitmap.height },
           });
@@ -1095,7 +1118,7 @@ export default function MasterEvidenceWorkspace() {
             status: "review" as const,
           };
         });
-        return [{ bounds, cropDataUrl: crop.toDataURL("image/png"), templateId: template?.id || null, fieldCrops, fieldQualitySummary: fieldQualitySummary(fieldCrops) as EmbeddedSlipRecord["fieldQualitySummary"], data: {
+        return [{ bounds, cropDataUrl: crop.toDataURL("image/png"), templateId: template?.id || null, fieldCrops, fieldQualitySummary: fieldQualitySummary(fieldCrops, { requiredFields: REQUIRED_REVIEW_FIELDS }) as EmbeddedSlipRecord["fieldQualitySummary"], data: {
           ...candidate.data,
           warnings: [...candidate.data.warnings, `${engineLabel} ตรวจพบกรอบสลิปจากภาพต้นฉบับ; หลักฐานภาพและ ${candidate.visual_cues.join(" / ")}; รอตรวจทาน`],
         } }];
@@ -1106,7 +1129,7 @@ export default function MasterEvidenceWorkspace() {
           ...field,
           cropSha256: await hashDataUrl(field.cropDataUrl),
         })));
-      proposal.fieldQualitySummary = fieldQualitySummary(proposal.fieldCrops) as EmbeddedSlipRecord["fieldQualitySummary"];
+      proposal.fieldQualitySummary = fieldQualitySummary(proposal.fieldCrops, { requiredFields: REQUIRED_REVIEW_FIELDS }) as EmbeddedSlipRecord["fieldQualitySummary"];
       }
       // One provider request per detected slip: all template field crops travel
       // together, so quota pressure is bounded and field provenance stays grouped.

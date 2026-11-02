@@ -10,6 +10,31 @@ const FIELD_NAMES = [
   "qr",
 ];
 
+// Template keys are intentionally display-oriented camelCase, while the
+// extraction contract uses the canonical snake_case names below. Keep this
+// mapping at the boundary so template geometry cannot silently lose values.
+const CANONICAL_FIELD_NAMES = Object.freeze({
+  bank: "bank_name",
+  amount: "amount",
+  senderName: "sender_name",
+  senderAccount: "sender_account",
+  receiverName: "receiver_name",
+  receiverAccount: "receiver_account",
+  transactionDate: "date",
+  transactionTime: "time",
+  referenceNo: "reference_no",
+  qr: "qr_payload",
+});
+
+export function toCanonicalFieldName(field) {
+  return CANONICAL_FIELD_NAMES[field] || field;
+}
+
+export function toTemplateFieldName(field) {
+  const entry = Object.entries(CANONICAL_FIELD_NAMES).find(([, canonical]) => canonical === field);
+  return entry ? entry[0] : field;
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -42,4 +67,30 @@ export function cropTemplateFields(source, plan) {
     // The UI layer attaches the actual data URL/Blob from these bounds.
     cropArtifact: null,
   }));
+}
+
+/**
+ * Joins template geometry with OCR evidence without dropping fields that OCR
+ * did not recognize. Missing OCR remains explicit and reviewable.
+ */
+export function mergeTemplateAndOcrFields(plan = {}, ocrTextBoxes = []) {
+  const entries = new Map(Object.entries(plan));
+  for (const box of ocrTextBoxes) {
+    for (const field of box.supportsFields || []) {
+      const templateField = toTemplateFieldName(field);
+      if (!entries.has(templateField)) entries.set(templateField, { field: templateField, source: "template_region_only", bounds: box.bounds });
+    }
+  }
+  return [...entries.values()].map((entry) => {
+    const boxes = ocrTextBoxes
+      .filter((box) => (box.supportsFields || []).some((field) => toTemplateFieldName(field) === entry.field))
+      .sort((left, right) => Number(right.confidence || 0) - Number(left.confidence || 0));
+    return {
+      field: entry.field,
+      source: entry.source,
+      bounds: boxes[0]?.bounds || entry.bounds,
+      ocrBox: boxes[0] || null,
+      alternatives: boxes.slice(1),
+    };
+  }).filter((entry) => entry.bounds && entry.bounds.width > 0 && entry.bounds.height > 0);
 }

@@ -44,16 +44,19 @@ export function assessFieldQuality({
   };
 }
 
-export function fieldQualitySummary(fields = []) {
+/** @param {Array<Record<string, any>>} fields @param {{requiredFields?: string[]}} options */
+export function fieldQualitySummary(fields = [], { requiredFields = [] } = {}) {
+  const presentFields = new Set(fields.map((field) => field.field));
+  const missingRequiredField = requiredFields.some((field) => !presentFields.has(field));
   return {
-    visual_quality: fields.every((field) => field.visual_quality === "pass") ? "pass" : "review_required",
-    region_quality: fields.every((field) => field.region_quality === "pass") ? "pass" : "review_required",
+    visual_quality: !missingRequiredField && fields.every((field) => field.visual_quality === "pass") ? "pass" : "review_required",
+    region_quality: !missingRequiredField && fields.every((field) => field.region_quality === "pass") ? "pass" : "review_required",
     recognition_quality: fields.some((field) => field.recognition_quality === "conflict")
       ? "conflict"
-      : fields.every((field) => field.recognition_quality === "pass") ? "pass" : "review_required",
+      : !missingRequiredField && fields.every((field) => field.recognition_quality === "pass") ? "pass" : "review_required",
     review_status: "review_required",
-    exact_candidate: fields.length > 0 && fields.every((field) => field.exact_candidate === true),
-    certification_status: fields.length > 0 && fields.every((field) => field.exact_candidate === true)
+    exact_candidate: !missingRequiredField && fields.length > 0 && fields.every((field) => field.exact_candidate === true),
+    certification_status: !missingRequiredField && fields.length > 0 && fields.every((field) => field.exact_candidate === true)
       ? "exact_candidate"
       : "review_required",
   };
