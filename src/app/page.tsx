@@ -2794,56 +2794,25 @@ export default function MasterEvidenceWorkspace() {
     ? `฿ ${evidenceState.totalNetLoss.toLocaleString("th-TH", { minimumFractionDigits: 2 })}`
     : "฿ 0.00";
 
-  // Factual Evidence Court Mapping Dataset (4 Columns Court Standard)
-  const courtEvidenceMapping = useMemo(() => {
-    return [
-      {
-        id: "ev-01",
-        pdfPage: "หน้า ๑",
-        quoteContext: "“พี่คะ ขอยืมเงิน 10,000 บาทก่อนได้ไหมคะ สิ้นเดือนหนูโอนคืนให้แน่นอนค่ะ”",
-        hashtags: ["#สัญญากู้ยืมเงิน", "#ยืมเงิน", "#นิติกรรมหนี้"],
-        lawType: "CIVIL" as const,
-        lawBadgeText: "แพ่ง" as const,
-        legalArticle: "อาจเข้าข่ายสัญญากู้ยืมเงิน ตามประมวลกฎหมายแพ่งและพาณิชย์ มาตรา ๖๕๓ วรรคหนึ่ง",
-      },
-      {
-        id: "ev-02",
-        pdfPage: "หน้า ๒",
-        quoteContext: "“ยอด 10,000 บาทที่ค้างอยู่ หนูไม่ได้หนีไปไหนนะคะ จะขอเริ่มทยอยผ่อนจ่ายให้เดือนละ 2,000 บาทค่ะ”",
-        hashtags: ["#รับสภาพหนี้", "#ผ่อนชำระ", "#อายุความสะดุดหยุดอยู่"],
-        lawType: "CIVIL" as const,
-        lawBadgeText: "แพ่ง" as const,
-        legalArticle: "อาจเข้าข่ายการรับสภาพหนี้ ตามประมวลกฎหมายแพ่งและพาณิชย์ มาตรา ๑๙๓/๑๔ (๑)",
-      },
-      {
-        id: "ev-03",
-        pdfPage: "หน้า ๓",
-        quoteContext: "“ร่วมลงทุนแพ็กเกจนี้ การันตีผลกำไร 30% ต่อวัน ได้เงินชัวร์ 100% โอนเงินเข้าบัญชีนี้แล้วรอรับเงินปันผลได้เลย”",
-        hashtags: ["#ฉ้อโกง", "#หลอกลงทุน", "#พรบคอมพิวเตอร์", "#ข้อความเท็จ"],
-        lawType: "CRIMINAL" as const,
-        lawBadgeText: "อาญา" as const,
-        legalArticle: "อาจเข้าข่ายความผิดฐานฉ้อโกง ตามประมวลกฎหมายอาญา มาตรา ๓๔๑ วรรคหนึ่ง และ พ.ร.บ.คอมพิวเตอร์ฯ มาตรา ๑๔ (๑)",
-      },
-      {
-        id: "ev-04",
-        pdfPage: "หน้า ๔",
-        quoteContext: "“พี่กดเลขบัญชีผิดโอนเงินเข้าไป 5,000 บาท ไม่ใช่เงินของคุณ รบกวนช่วยโอนเงินกลับคืนด้วยนะคะ”",
-        hashtags: ["#ลาภมิควรได้", "#โอนเงินผิดบัญชี", "#ยักยอกทรัพย์"],
-        lawType: "CIVIL" as const,
-        lawBadgeText: "แพ่ง" as const,
-        legalArticle: "อาจเข้าข่ายลาภมิควรได้ ตามประมวลกฎหมายแพ่งและพาณิชย์ มาตรา ๔๐๖ (หากเจตนาเบียดบังอาจเข้าข่ายยักยอกทรัพย์ ป.อ. มาตรา ๓๕๒)",
-      },
-      {
-        id: "ev-05",
-        pdfPage: "หน้า ๕",
-        quoteContext: "“ยินยอมเปิดบัญชีธนาคารและส่งมอบซิมการ์ดโทรศัพท์ให้เพื่อแลกกับค่าจ้าง 1,500 บาท เอาไปใช้งานได้เลย”",
-        hashtags: ["#บัญชีม้า", "#ซิมม้า", "#พรกมาตรการป้องกันปราบปรามอาชญากรรมทางเทคโนโลยี"],
-        lawType: "CRIMINAL" as const,
-        lawBadgeText: "อาญา" as const,
-        legalArticle: "อาจเข้าข่ายความผิดฐานเปิดหรือยินยอมให้ผู้อื่นใช้บัญชีเงินฝาก (บัญชีม้า) ตาม พ.ร.ก. มาตรการป้องกันและปราบปรามอาชญากรรมทางเทคโนโลยี พ.ศ. 2566 มาตรา ๙, ๑๐, ๑๑",
-      },
-    ];
-  }, []);
+  // Evidence Reference Mapping must be derived from observed OCR occurrences.
+  // The legal dictionary supplies review leads only; it must never supply a
+  // sample sentence as if that sentence appeared in the user's evidence.
+  const courtEvidenceMapping = useMemo(() => legalSignalHits.map((hit) => {
+    const lawId = `${hit.lawId} ${hit.provisionId}`.toLowerCase();
+    const lawType = /อาญา|criminal|penal|computer|technology|crime/.test(lawId) ? "CRIMINAL" : "CIVIL";
+    return {
+      id: hit.id,
+      pdfPage: `หน้า ${hit.page}`,
+      quoteContext: `“${hit.text}”`,
+      hashtags: [`#${hit.phrase}`],
+      lawType: lawType as "CIVIL" | "CRIMINAL",
+      lawBadgeText: lawType === "CRIMINAL" ? "อาญา" as const : "แพ่ง" as const,
+      legalArticle: `สัญญาณ “${hit.phrase}” · ${hit.provisionId || hit.lawId || "ยังไม่มีเลขมาตรา"} · ต้องตรวจข้อเท็จจริงโดยมนุษย์`,
+      sourceFileName: hit.sourceFileName,
+      bounds: hit.bounds,
+      confidence: hit.confidence,
+    };
+  }), [legalSignalHits]);
 
   const filteredEvidenceMapping = useMemo(() => {
     return courtEvidenceMapping.filter((item) => {
