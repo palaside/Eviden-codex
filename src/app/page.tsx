@@ -131,14 +131,20 @@ async function buildBankEvidence(record: EmbeddedSlipRecord): Promise<NonNullabl
   const bankLine = [...(record.ocrTextBoxes || []), ...traceLines]
     .filter((box) => /ธนาคาร|^\s*ธ.{1,8}\s*$|กรุงไทย|กสิกร|กรุงเทพ|ไทยพาณิชย์|กรุงศรี|ทหารไทย|ttb|gsb|bank/i.test(box.text))
     .sort((left, right) => right.confidence - left.confidence)[0];
-  const knownBank = bankLine?.text.match(/กรุงไทย|krungthai|กสิกรไทย|kasikorn|กรุงเทพ|bangkok\s*bank|ไทยพาณิชย์|\bscb\b|กรุงศรี|krungsri|ทหารไทยธนชาต|ทีเอ็มบีธนชาต|\bttb\b|ออมสิน|\bgsb\b/i);
+  const bankTextEvidence = resolveBankTextEvidence({
+    structuredBank,
+    structuredConfidence: record.data.bank.confidence || 0,
+    boxes: [...(record.ocrTextBoxes || []), ...traceLines],
+  });
   const evidence = {
-    value: structuredBank || (knownBank ? bankLine?.text.trim() || null : null),
-    rawOcr: bankLine?.text || null,
-    confidence: structuredBank ? Math.max(record.data.bank.confidence || 0, knownBank ? bankLine?.confidence || 0 : 0.8) : knownBank ? bankLine?.confidence || 0 : 0,
-    bounds: bankLine?.bounds || null,
-    evidence: { text: Boolean(structuredBank || knownBank), logo: false },
-    status: structuredBank || knownBank ? "pass" : "review_required",
+    value: bankTextEvidence.value,
+    rawOcr: bankTextEvidence.rawOcr,
+    // A structured bank value without a matching OCR line is not visual evidence.
+    // Keep confidence at zero until text or logo evidence supports the value.
+    confidence: bankTextEvidence.confidence,
+    bounds: bankTextEvidence.bounds,
+    evidence: { text: bankTextEvidence.hasTextEvidence, logo: false },
+    status: bankTextEvidence.status,
   } as NonNullable<EmbeddedSlipRecord["bankEvidence"]>;
   if (!record.cropDataUrl) return evidence;
   try {
@@ -330,6 +336,7 @@ import { selectDerivedProcessingSource } from "@/utils/derived-processing-source
 import { attachResearchRun, formatReviewCanvasLabel, getResearchArtifacts, getReviewPreviewSource, prepareResearchQueueForPersistence, resolveReviewCanvasSource } from "@/utils/review-preview-source.mjs";
 import { shouldRenderChatSlices } from "@/utils/review-canvas-render-mode.mjs";
 import { assessFieldQuality, fieldQualitySummary } from "@/utils/field-quality-gate.mjs";
+import { resolveBankTextEvidence } from "@/utils/bank-evidence.mjs";
 import { sha256Hex } from "@/utils/sha256-browser.mjs";
 import { createArtifactRecord, createResearchRunManifest } from "@/utils/dual-stream-enhancement.mjs";
 
