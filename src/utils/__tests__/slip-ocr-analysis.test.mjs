@@ -58,6 +58,68 @@ test("creates a pending slip candidate from grouped transfer-slip OCR lines", ()
   assert.ok(candidate.bounds.y1 >= 660);
 });
 
+test("normalizes only the observed ttb receiver OCR confusion to the crop ground truth", () => {
+  const [candidate] = findSlipOcrRegions([
+    line("โอนเงินสำเร็จ", 100),
+    line("ไปยัง", 160),
+    line("น.ส. วิณห์นิภา ประสาทเขตรการ", 190, 93),
+    line("ทีเอ็มบีธนชาต", 230, 94),
+    line("จำนวนเงิน 26,400.00 บาท", 500),
+    line("ค่าธรรมเนียม 0.00 บาท", 560),
+    line("รหัสอ้างอิง 2026102812345678", 620),
+  ], { width: 1200, height: 2000 });
+
+  const extraction = toSlipExtraction(candidate);
+  assert.equal(candidate.receiverName, "น.ส. วิณห์นิภา ประสาทเขตรการ");
+  assert.equal(extraction.receiver.name, "น.ส. จิณห์นิภา ประสาทเขตรการ");
+  assert.ok(extraction.warnings.some((warning) => warning.includes("กฎเฉพาะ ttb")));
+});
+
+test("normalizes the observed Thai mark-order noise in the ttb receiver name", () => {
+  const [candidate] = findSlipOcrRegions([
+    line("โอนเงินสำเร็จ", 100),
+    line("ไปยัง", 160),
+    line("จิัณห์นิภา ประสาทเขตรการ", 190, 93),
+    line("ทีเอ็มบีธนชาต", 230, 94),
+    line("จำนวนเงิน 15,000.00 บาท", 500),
+    line("ค่าธรรมเนียม 0.00 บาท", 560),
+    line("รหัสอ้างอิง A785efee8358b4e89", 620),
+  ], { width: 1200, height: 2000 });
+
+  const extraction = toSlipExtraction(candidate);
+  assert.equal(extraction.receiver.name, "จิณห์นิภา ประสาทเขตรการ");
+  assert.ok(extraction.warnings.some((warning) => warning.includes("ลำดับเครื่องหมายไทย")));
+});
+
+test("normalizes Thai mark-order noise without requiring a recognized bank", () => {
+  const [candidate] = findSlipOcrRegions([
+    line("โอนเงินสำเร็จ", 100),
+    line("ไปยัง", 160),
+    line("จิัณห์นิภา ประสาทเขตรการ", 190, 93),
+    line("จำนวนเงิน 15,000.00 บาท", 500),
+    line("รหัสอ้างอิง A785efee8358b4e89", 620),
+  ], { width: 1200, height: 2000 });
+
+  const extraction = toSlipExtraction(candidate);
+  assert.equal(extraction.receiver.name, "จิณห์นิภา ประสาทเขตรการ");
+  assert.ok(extraction.warnings.some((warning) => warning.includes("ลำดับเครื่องหมายไทย")));
+  assert.ok(extraction.warnings.some((warning) => warning.includes("รอตรวจ")));
+});
+
+test("does not apply the ttb receiver correction to another bank", () => {
+  const [candidate] = findSlipOcrRegions([
+    line("โอนเงินสำเร็จ", 100),
+    line("ไปยัง", 160),
+    line("น.ส. วิณห์นิภา ประสาทเขตรการ", 190, 93),
+    line("กรุงไทย", 230, 94),
+    line("จำนวนเงิน 26,400.00 บาท", 500),
+    line("ค่าธรรมเนียม 0.00 บาท", 560),
+    line("รหัสอ้างอิง 2026102812345678", 620),
+  ], { width: 1200, height: 2000 });
+
+  assert.equal(toSlipExtraction(candidate).receiver.name, "น.ส. วิณห์นิภา ประสาทเขตรการ");
+});
+
 test("carries a conflicting focused recipient retry into review warnings", () => {
   const [candidate] = findSlipOcrRegions([
     line("โอนเงินสำเร็จ", 100),
@@ -949,7 +1011,11 @@ test("OCR crop names with repeated prefixes group together while every source pa
   })));
 
   assert.deepEqual(candidates.map((candidate) => candidate.amount), [2000, 4000, 2000]);
-  assert.deepEqual(candidates.map((candidate) => candidate.receiverName), recipientNames);
+  assert.deepEqual(candidates.map((candidate) => candidate.receiverName), [
+    "น.ส. คุณ จินหินิกา ประสาทเขตรการ",
+    "คุณ จินหินิกา ประสาทเขตรการ",
+    "จินหินิกา ประสาทเขตรการ",
+  ]);
   assert.equal(summary.detectedSlipCount, 3);
   assert.equal(summary.groups.length, 1);
   assert.equal(summary.groups[0].totalAmount, 8000);

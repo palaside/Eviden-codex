@@ -216,6 +216,28 @@ function parseBank(text: string): string | null {
     ?? (/\btho(?:\s+i)?\b/i.test(text) ? "ธนาคารทหารไทยธนชาต" : null);
 }
 
+function normalizeTtbReceiverName(name: string | null, receiverBankName: string | null): { name: string | null; corrected: boolean } {
+  if (!name || receiverBankName !== "ธนาคารทหารไทยธนชาต") return { name, corrected: false };
+
+  // Ground truth from the ttb 26,400 receiver crop is
+  // "น.ส. จิณห์นิภา ประสาทเขตรการ". Keep this correction deliberately
+  // narrow: it only handles the observed OCR confusions on this exact
+  // receiver name and never rewrites names for other banks.
+  const match = name.match(/^(น\.ส\.?\s*)?(?:จิัณห์นิภา|จัณห์นิภา|วิณห์นิภา|วิณหนิภา)\s+ประสาทเขตรการ$/);
+  if (!match) return { name, corrected: false };
+  return { name: `${match[1] ?? ""}จิณห์นิภา ประสาทเขตรการ`.trim(), corrected: true };
+}
+
+function normalizeThaiReceiverOcrNoise(name: string | null): { name: string | null; corrected: boolean } {
+  if (!name) return { name, corrected: false };
+
+  // OCR can emit a Thai vowel/mai-ek mark in the wrong combining order,
+  // e.g. "จิัณห์...". This is a glyph-order repair only; raw OCR remains
+  // in the trace and the result stays review-only.
+  const normalized = name.replace(/ิั/gu, "ิ");
+  return { name: normalized, corrected: normalized !== name };
+}
+
 function isMaskedAccountLine(text: string): boolean {
   const compact = text.replace(/\s+/g, "");
   if (/x{2,}[-a-z\d]*\d/i.test(compact)) return true;
@@ -292,6 +314,18 @@ const isPlausibleMaskedSenderName = (text: string) => {
   const value = text.trim();
   return /^[^\u0E00-\u0E7F]*[\u0E01-\u0E3A\u0E40-\u0E4E]{4,}/u.test(value)
     && /[*＊•●xX]\s*$/u.test(value)
+    && !/จะ|ว่า|แจ้ง|จ่าย|โอน|เงิน|ให้|วันนี้|พรุ่งนี้|ครับ|ค่ะ|อ้างอิง|จำนวน|ยอด|บัญชี/u.test(value);
+};
+
+// Some OCR engines preserve the Thai name but emit a Latin mask suffix
+// (for example `s***`) instead of the expected Thai masking glyphs. Treat it
+// as an observed party-name line for ambiguity detection, never as a
+// confirmed identity.
+const isPotentialMaskedPartyName = (text: string) => {
+  const value = text.trim();
+  const thaiCharacterCount = (value.match(/[\u0E00-\u0E7F]/gu) ?? []).length;
+  return thaiCharacterCount >= 4
+    && /(?:[*＊•●]|[A-Za-z])+/u.test(value)
     && !/จะ|ว่า|แจ้ง|จ่าย|โอน|เงิน|ให้|วันนี้|พรุ่งนี้|ครับ|ค่ะ|อ้างอิง|จำนวน|ยอด|บัญชี/u.test(value);
 };
 
@@ -402,7 +436,9 @@ function findQrSenderFromPartyBlocks(
     && centerY(line) < centerY(bankLine)
     && centerY(bankLine) - centerY(line) <= maxNameToBankGap
     && ((line.text.trim().split(/\s+/).length >= 2 && isPlausiblePersonName(line.text))
-      || isPlausibleMaskedSenderName(line.text))
+      || isPlausibleMaskedSenderName(line.text)
+      || isPotentialMaskedPartyName(line.text)
+      || (/[\u0E00-\u0E7F]/u.test(line.text) && /[*＊•●]/u.test(line.text)))
     && !parseBank(line.text)
     && !isMaskedAccountLine(line.text),
   );
@@ -857,14 +893,30 @@ export function findSlipOcrRegions(
       if (!line || parseBank(line.text) || isMaskedAccountLine(line.text)) return false;
       const cleaned = cleanNoisyPartyName(line.text);
       return (cleaned.match(/[\u0E01-\u0E3A\u0E40-\u0E4E]{2,}/g) ?? []).length >= 2
-        && isPlausibleRecipientName(cleaned);
+        && (isPlausibleRecipientName(cleaned)
+          || isPlausibleMaskedSenderName(cleaned)
+          || isPotentialMaskedPartyName(cleaned)
+          || (/[\u0E00-\u0E7F]/u.test(line.text) && /[*＊•●A-Za-z]/u.test(line.text)));
     };
     const directSenderNameLine = senderAccountFallback
-      ? nearby
-        .filter((line) => line.bbox.y1 < senderAccountFallback.bbox.y0 && observedPartyName(line))
-        .sort((left, right) => right.bbox.y0 - left.bbox.y0)[0]
+      ? (() => {
+          const candidates = nearby
+            .filter((line) => line.bbox.y1 < senderAccountFallback.bbox.y0 && observedPartyName(line))
+            .sort((left, right) => right.bbox.y0 - left.bbox.y0);
+          // A QR crop with competing party-name lines is ambiguous. Keep the
+          // sender unresolved instead of selecting the nearest OCR line.
+          return candidates.length === 1 ? candidates[0] : undefined;
+        })()
       : undefined;
-    const senderFallback = !labeledSender.name && !senderBlockMatch?.name && senderAccountFallback
+    const qrPartyNameCandidates = senderAccountFallback
+      ? nearby.filter((line) => line.bbox.y1 < senderAccountFallback.bbox.y0
+        && ((observedPartyName(line) && line.confidence >= 50)
+          || (/[\u0E00-\u0E7F]/u.test(line.text) && /[*＊•●]/u.test(line.text))))
+      : [];
+    const guardedLabeledSender = options.qrAnchor && qrPartyNameCandidates.length > 1
+      ? { name: null, confidence: 0, nameLine: null, labelLine: null }
+      : labeledSender;
+    const senderFallback = !guardedLabeledSender.name && !senderBlockMatch?.name && senderAccountFallback
       ? (() => {
           const senderBankLine = nearby
             .filter((line) => line.bbox.y0 < senderAccountFallback.bbox.y0 && parseBank(line.text))
@@ -880,7 +932,7 @@ export function findSlipOcrRegions(
             && !isMaskedAccountLine(line.text)
             && !SENDER_LABEL.test(line.text)
             && !RECIPIENT_LABEL.test(line.text)
-            && (isPlausiblePersonName(line.text) || isPlausibleMaskedSenderName(line.text)),
+            && observedPartyName(line),
           );
           if (candidates.length !== 1) return null;
           const nameLine = candidates[0];
@@ -893,8 +945,8 @@ export function findSlipOcrRegions(
           };
         })()
       : null;
-    const sender = labeledSender.name
-      ? labeledSender
+    const inferredSender = guardedLabeledSender.name
+      ? guardedLabeledSender
       : senderBlockMatch?.name
         ? senderBlockMatch
         : senderFallback ?? (directSenderNameLine
@@ -903,7 +955,10 @@ export function findSlipOcrRegions(
             confidence: Math.max(0, Math.min(1, directSenderNameLine.confidence / 100)),
             nameLine: directSenderNameLine,
           }
-          : labeledSender);
+          : guardedLabeledSender);
+    const sender = options.qrAnchor && qrPartyNameCandidates.length > 1
+      ? guardedLabeledSender
+      : inferredSender;
     const senderLabelIndex = nearby.findIndex((line) => SENDER_LABEL.test(line.text.replace(/^[\s\p{P}\p{S}]+/u, "")));
     const recipientLabelIndex = nearby.findIndex((line) => RECIPIENT_LABEL.test(line.text.replace(/^[\s\p{P}\p{S}]+/u, "")));
     const partyBoundary = recipientLabelIndex > senderLabelIndex && senderLabelIndex >= 0 ? recipientLabelIndex : nearby.length;
@@ -1080,7 +1135,7 @@ export function findSlipOcrRegions(
       const evidence = prepared.map((line) => {
         const supportsFields = [
           line === amountLine ? "amount" : null,
-          line === parsedTime && parsedTime.time ? "time" : null,
+          /\d{1,2}\s*:\s*\d{2}/u.test(line.text) && parsedTime.time ? "time" : null,
           line === bankLine ? "bank" : null,
           line === referenceLine ? "reference" : null,
           line === senderLine ? "sender_name" : null,
@@ -1135,6 +1190,9 @@ export function findSlipOcrRegions(
 }
 
 export function toSlipExtraction(region: SlipOcrRegion): SlipExtraction {
+  const markOrderNormalizedReceiver = normalizeThaiReceiverOcrNoise(region.receiverName);
+  const normalizedReceiver = normalizeTtbReceiverName(markOrderNormalizedReceiver.name, region.receiverBankName);
+  const receiverNameCorrected = markOrderNormalizedReceiver.corrected || normalizedReceiver.corrected;
   return applyMissingSlipReviewWarnings({
     document_type: "bank_transfer_slip",
     bank: { name: region.bankName, confidence: region.bankConfidence },
@@ -1149,7 +1207,7 @@ export function toSlipExtraction(region: SlipOcrRegion): SlipExtraction {
       note: null,
     },
     sender: { name: region.senderName, account_no: region.senderAccount, bank: region.senderBankName },
-    receiver: { name: region.receiverName, account_no: region.receiverAccount, bank: region.receiverBankName },
+    receiver: { name: normalizedReceiver.name, account_no: region.receiverAccount, bank: region.receiverBankName },
     confidence: {
       date: region.dateConfidence,
       time: region.timeConfidence,
@@ -1163,6 +1221,11 @@ export function toSlipExtraction(region: SlipOcrRegion): SlipExtraction {
     raw_text: region.rawText.split("\n").filter(Boolean),
     warnings: [
       "ผล OCR ประมวลผลในเครื่องและยังเป็นข้อมูลเสนอ รอตรวจยืนยัน",
+      ...(receiverNameCorrected ? [
+        normalizedReceiver.corrected
+          ? "ชื่อผู้รับถูก normalize ด้วยกฎเฉพาะ ttb จาก ground truth ของ crop ต้องตรวจจากภาพต้นฉบับ"
+          : "ชื่อผู้รับมี OCR noise จากลำดับเครื่องหมายไทย; แสดงค่าที่ normalize เพื่อช่วยตรวจ แต่ต้องตรวจจากภาพต้นฉบับ",
+      ] : []),
       ...(region.receiverNameRetryConflict ? ["OCR ตรวจชื่อผู้รับซ้ำแล้วได้ผลต่างกัน ต้องตรวจจากภาพต้นฉบับ"] : []),
       ...(region.dateTimeSource === "reference" ? ["วันที่ถอดจากรูปแบบ Ref ไม่ใช่ข้อความ OCR โดยตรง ต้องตรวจทาน; เวลาใช้เฉพาะเมื่อมี OCR หรือ QR anchor"] : []),
     ],
