@@ -26,21 +26,44 @@ const requestedCaseIds = (process.env.E2E_CASE_IDS || "").split(",").map((id) =>
 const selectedCases = requestedCaseIds.length ? cases.filter((testCase) => requestedCaseIds.includes(testCase.id)) : cases;
 
 await fs.mkdir(outDir, { recursive: true });
-const browser = await chromium.launch({ headless: true, executablePath: process.env.E2E_BROWSER_EXECUTABLE || undefined });
-const report = { baseUrl, generatedAt: new Date().toISOString(), cases: [], passed: false };
+const browser = process.env.E2E_CDP_URL
+  ? await chromium.connectOverCDP(process.env.E2E_CDP_URL)
+  : await chromium.launch({
+    headless: process.env.E2E_HEADLESS !== "false",
+    executablePath: process.env.E2E_BROWSER_EXECUTABLE || undefined,
+    args: ["--no-sandbox", "--proxy-server=direct://", "--proxy-bypass-list=*"]
+  });
+const report = {
+  schemaVersion: "digital-evidence.ocr-benchmark-limited-fields.v1",
+  baseUrl,
+  generatedAt: new Date().toISOString(),
+  claimScope: "limited_expected_fields_only",
+  exactFieldsMeasured: ["amount", "recipient"],
+  fieldsNotMeasured: ["sender_name", "sender_account", "receiver_account", "bank", "date", "time", "reference", "qr_payload"],
+  passedMeans: "upload/process/UI/JSON trace และ exact เฉพาะ amount กับ recipient ของ case ที่มี expected เท่านั้น; ไม่ใช่ exact ทุก field",
+  cases: [],
+  passed: false,
+};
 
 try {
   for (const testCase of selectedCases) {
     const context = await browser.newContext({ viewport: { width: 1662, height: 1548 } });
     const page = await context.newPage();
-    const result = { id: testCase.id, fixture: testCase.fixture, expected: testCase.expected, steps: [] };
+    const result = {
+      id: testCase.id,
+      fixture: testCase.fixture,
+      expected: testCase.expected,
+      expectedFields: Object.keys(testCase.expected),
+      fieldsNotMeasured: report.fieldsNotMeasured,
+      steps: [],
+    };
     try {
       await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
       await page.getByText("PURE ZERO STATE", { exact: true }).waitFor({ state: "visible", timeout: 60_000 });
       await page.locator("#evidence-file-input").waitFor({ state: "attached", timeout: 60_000 });
       await page.waitForTimeout(500);
       await page.locator("#evidence-file-input").setInputFiles(testCase.fixture);
-      await page.getByText(path.basename(testCase.fixture), { exact: true }).waitFor({ state: "visible", timeout: 60_000 });
+      await page.getByText(path.basename(testCase.fixture), { exact: true }).waitFor({ state: "visible", timeout: 180_000 });
       await page.getByRole("button", { name: /เริ่มประมวลผลพยานหลักฐาน/ }).click();
       await page.waitForFunction(() => !/กำลังประมวลผลแบบ Cross-Matching|กำลังสกัดพยานหลักฐานระดับพิกเซล/.test(document.body?.innerText || ""), undefined, { timeout: 300_000 });
       const bodyText = await page.locator("body").innerText();
@@ -50,6 +73,19 @@ try {
         recipient: bodyText.includes(testCase.expected.recipient),
         reviewOnly: bodyText.includes("รอตรวจ") || bodyText.includes("รอตรวจจากภาพ"),
       };
+      const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
+      await page.getByRole("button", { name: /ดาวน์โหลด JSON Trace/ }).click();
+      const download = await downloadPromise;
+      const tracePath = path.join(outDir, `${testCase.id}-trace.json`);
+      await download.saveAs(tracePath);
+      const trace = JSON.parse(await fs.readFile(tracePath, "utf8"));
+      const traceItems = Array.isArray(trace.items) ? trace.items : [];
+      const traceCandidates = traceItems.flatMap((item) => Array.isArray(item.candidates) ? item.candidates : []);
+      observed.jsonTrace = trace.schema === "digital-evidence.extraction-diagnostic-trace.v1";
+      observed.sourceSha256 = traceItems.some((item) => typeof item.source?.sha256 === "string" && item.source.sha256.length === 64);
+      observed.ocrAttempts = Number(trace.statistics?.ocrAttempts || 0) > 0;
+      observed.ocrDiagnosticTrace = traceItems.some((item) => item.ocrDiagnosticTrace || traceCandidates.some((candidate) => candidate.ocrDiagnosticTrace));
+      observed.reviewRequiredTrace = traceItems.some((item) => item.candidates?.some((candidate) => candidate.needsReview === true)) || trace.statistics?.candidatesNeedsReview > 0;
       result.observed = observed;
       result.passed = Object.values(observed).every(Boolean);
       result.steps.push({ name: "upload-process-ui-assertions", ok: result.passed });
