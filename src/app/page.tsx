@@ -375,6 +375,11 @@ type LegalSignalHit = {
   lawId: string;
   phrase: string;
   sourceKind: string;
+  sourceSha256: string | null;
+  sourceUrl: string | null;
+  sourceStatus: string | null;
+  sourceVersion: string | null;
+  locator: string | null;
   reviewStatus: "human_review_required";
   legalDecision: false;
   missingEvidence: string[];
@@ -668,6 +673,11 @@ export default function MasterEvidenceWorkspace() {
               lawId: match.lawId,
               phrase: match.phrase,
               sourceKind: match.sourceKind,
+              sourceSha256: item.meta?.sha256 || null,
+              sourceUrl: match.sourceUrl || null,
+              sourceStatus: match.sourceStatus || null,
+              sourceVersion: match.sourceVersion || null,
+              locator: match.locator || null,
               reviewStatus: "human_review_required",
               legalDecision: false,
               missingEvidence: match.missingEvidence,
@@ -2809,6 +2819,11 @@ export default function MasterEvidenceWorkspace() {
       lawBadgeText: lawType === "CRIMINAL" ? "อาญา" as const : "แพ่ง" as const,
       legalArticle: `สัญญาณ “${hit.phrase}” · ${hit.provisionId || hit.lawId || "ยังไม่มีเลขมาตรา"} · ต้องตรวจข้อเท็จจริงโดยมนุษย์`,
       sourceFileName: hit.sourceFileName,
+      sourceSha256: hit.sourceSha256,
+      sourceUrl: hit.sourceUrl,
+      sourceStatus: hit.sourceStatus,
+      sourceVersion: hit.sourceVersion,
+      locator: hit.locator,
       bounds: hit.bounds,
       confidence: hit.confidence,
     };
@@ -6033,7 +6048,7 @@ export default function MasterEvidenceWorkspace() {
                               <div className="font-semibold text-slate-100">หน้า {hit.page} · {hit.phrase}</div>
                               <div className="mt-1 break-words text-[11px] text-amber-100">“{hit.text}”</div>
                               <div className="mt-1 text-[10px] text-slate-500">
-                                {hit.sourceFileName} · พิกัด {Math.round(hit.bounds.x)},{Math.round(hit.bounds.y)} · OCR {Math.round(hit.confidence * 100)}% · {hit.provisionId}
+                                {hit.sourceFileName} · SHA {hit.sourceSha256?.slice(0, 12) || "ไม่มี"} · พิกัด {Math.round(hit.bounds.x)},{Math.round(hit.bounds.y)} · OCR {Math.round(hit.confidence * 100)}% · {hit.provisionId}
                               </div>
                             </div>
                             <button
@@ -6056,7 +6071,7 @@ export default function MasterEvidenceWorkspace() {
                             >{legalResearchingHitId === hit.id ? "กำลังค้นกฎหมาย..." : "ค้นกฎหมายประกอบ"}</button>
                           </div>
                           <div className="mt-1.5 text-[10px] text-slate-400">
-                            สถานะ: รอตรวจทาน · ไม่ได้ยืนยันการฝ่าฝืน · ต้องตรวจบริบทและตัวชี้ค้าน
+                            สถานะ: รอตรวจทาน · ไม่ได้ยืนยันการฝ่าฝืน · ต้องตรวจบริบทและตัวชี้ค้าน · แหล่งกฎ {hit.sourceKind}{hit.sourceVersion ? ` · รุ่น ${hit.sourceVersion}` : ""}{hit.locator ? ` · ${hit.locator}` : ""}
                           </div>
                           {legalResearchByHit[hit.id] && (
                             <div className="mt-2 rounded border border-indigo-300/20 bg-indigo-950/20 p-2 text-[10px] text-indigo-100">
@@ -6371,6 +6386,12 @@ export default function MasterEvidenceWorkspace() {
                             {/* Column 4: เนื้อหากฎหมาย */}
                             <td className="py-3 px-3 align-top leading-relaxed text-slate-300">
                               <span className="font-semibold text-slate-100">{item.legalArticle}</span>
+                              <div className="mt-1 text-[10px] text-slate-500">
+                                กฎ: {item.sourceStatus || "ไม่ระบุสถานะ"} · รุ่น: {item.sourceVersion || "ไม่ระบุ"} · locator: {item.locator || "ไม่ระบุ"}
+                                {item.sourceUrl ? (
+                                  <a href={item.sourceUrl} target="_blank" rel="noreferrer" className="ml-1 text-sky-300 underline decoration-sky-300/40">เปิดแหล่งอ้างอิง</a>
+                                ) : null}
+                              </div>
                             </td>
                           </tr>
                         ))
