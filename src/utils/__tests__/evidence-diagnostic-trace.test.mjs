@@ -22,6 +22,17 @@ test("exports per-image OCR and QR diagnostics with provenance but without sourc
     data: { sender: { name: null }, receiver: { name: "ผู้รับ" }, transaction: { amount: 3000, reference_no: "R1" } },
     sourceBounds: { x: 10, y: 20, width: 30, height: 40 },
     ocrTextBoxes: [{ text: "3,000.00", confidence: 0.91, bounds: { x: 1, y: 2, width: 3, height: 4 }, classification: "slip_evidence", supportsFields: ["amount"] }],
+    fieldCrops: [{
+      field: "amount",
+      source: "template_region_only",
+      bounds: { x: 1, y: 2, width: 3, height: 4 },
+      cropDataUrl: "data:image/png;base64,field-crop-must-not-export",
+      cropSha256: "c".repeat(64),
+      rawOcr: "3,000.00",
+      confidence: 0.91,
+      review_status: "review_required",
+      status: "review",
+    }],
     ocrDiagnosticTrace: trace,
     qrScanDiagnostic: { inputWidth: 400, inputHeight: 800, pixelFingerprint: "abcd1234", productionUpscale: 1, scans: [{ scale: 1, decoder: "jsQR", decoded: true }] },
     processingWarnings: [],
@@ -37,6 +48,9 @@ test("exports per-image OCR and QR diagnostics with provenance but without sourc
   assert.equal(result.items[0].source.sha256, "source-sha");
   assert.equal(result.items[0].ocrDiagnosticTrace.attempts[0].lines[0].text, "3,000.00");
   assert.equal(result.items[0].candidates[0].data.transaction.amount, 3000);
+  assert.equal(result.items[0].candidates[0].fieldCrops[0].field, "amount");
+  assert.equal(result.items[0].candidates[0].fieldCrops[0].cropSha256, "c".repeat(64));
+  assert.equal("cropDataUrl" in result.items[0].candidates[0].fieldCrops[0], false);
   assert.equal("file" in result.items[0], false);
   assert.equal("previewUrl" in result.items[0], false);
   assert.equal(JSON.stringify(result).includes("must-not-export"), false);

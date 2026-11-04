@@ -13,6 +13,7 @@ import { reconcilePageOcrNamesIntoQrCandidates } from "@/utils/reconcile-slip-oc
 import { createCanvasEvidenceArtifact } from "@/utils/evidence-image-artifacts.mjs";
 import { buildOcrAttemptTrace, explainSlipOcrRegionRejection } from "@/utils/slip-ocr-trace.mjs";
 import { attachOcrTraceToQrCandidates } from "@/utils/local-ocr-fallback.mjs";
+import { buildLocalOcrPassPlan } from "@/utils/local-slip-ocr-plan.mjs";
 import type { SlipOcrAttemptTrace, SlipOcrDiagnosticTrace, SlipOcrRegionTrace } from "@/types/slip-ocr-trace";
 import {
   evaluateEnhancedOcrRetry,
@@ -224,10 +225,13 @@ export async function extractSlipCandidatesWithLocalOcr(
       }
     }
 
-    // Chat pages use the QR anchor to avoid OCR over the entire page. A standalone
-    // slip is different: its whole canvas is already the evidence object, so the
-    // bounded QR retry loop would duplicate work and can hit the 120s job timeout.
-    if (options.jobKind !== "SLIP") for (const qrCandidate of qrCandidates) {
+    // Run a bounded QR-anchored pass for both chat and standalone slips. A
+    // standalone upload can be an A4 evidence page with large white margins;
+    // OCRing only that full canvas can return a QR-only candidate even when the
+    // visible field text is readable. The full-page pass below remains required
+    // so field coordinates stay in the original evidence coordinate space.
+    const passPlan = buildLocalOcrPassPlan(options.jobKind, qrCandidates.length);
+    if (passPlan.qrAnchored) for (const qrCandidate of qrCandidates) {
       const objectBounds = options.jobKind === "CHAT"
         ? findQrSlipObjectBounds(contourCandidates, qrCandidate.bounds, {
             width: canvas.width,

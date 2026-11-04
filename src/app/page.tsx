@@ -72,7 +72,10 @@ async function buildLocalFieldCrops(record: EmbeddedSlipRecord): Promise<NonNull
     image.onload = () => resolve();
     image.onerror = () => reject(new Error("โหลด crop เพื่อสร้าง field provenance ไม่สำเร็จ"));
   });
-  const template = selectSlipTemplate({ bankName: record.data.bank.name, rawText: record.data.raw_text });
+  const template = selectSlipTemplate({
+    bankName: [record.data.bank.name, record.data.receiver.bank, record.data.sender.bank].filter(Boolean).join(" "),
+    rawText: record.data.raw_text,
+  });
   const plan = buildTemplateFieldPlan(template, { width: image.naturalWidth, height: image.naturalHeight });
   const fields = mergeTemplateAndOcrFields(plan, record.ocrTextBoxes || []);
   const result: NonNullable<EmbeddedSlipRecord["fieldCrops"]> = [];
@@ -2259,6 +2262,30 @@ export default function MasterEvidenceWorkspace() {
           );
         }
 
+        const standaloneFieldCrops = isSlip && slip && currentSlipCandidate
+          ? await buildLocalFieldCrops({
+            id: `${targetItem.id}-standalone-slip`,
+            extractionVersion: EXTRACTION_VERSION,
+            sourceItemId: targetItem.id,
+            sourceFileName: targetItem.file.name,
+            sourceSha256: sha256,
+            data: slip,
+            sourceBounds: currentSlipCandidate.bounds,
+            cropDataUrl: currentSlipCandidate.cropDataUrl,
+            ocrTextBoxes: currentSlipCandidate.ocrTextBoxes,
+            ocrDiagnosticTrace: currentSlipCandidate.ocrDiagnosticTrace,
+            chatPageNumber: 1,
+            chatPageCount: 1,
+            dossierPageNumber: 4,
+            isDuplicate: false,
+            isConfirmed: false,
+            needsReview: true,
+          } as EmbeddedSlipRecord)
+          : undefined;
+        const standaloneFieldQualitySummary = standaloneFieldCrops
+          ? fieldQualitySummary(standaloneFieldCrops, { requiredFields: REQUIRED_REVIEW_FIELDS }) as EmbeddedSlipRecord["fieldQualitySummary"]
+          : undefined;
+
         // Update item in queue
         const ocrFailures = ocrFailedPagesByItem.get(targetItem.id);
         const ocrWarning = ocrFailures?.size && (!isSlip || Boolean(slip))
@@ -2275,7 +2302,7 @@ export default function MasterEvidenceWorkspace() {
           : null;
         currentQueue = currentQueue.map((item, idx) =>
           idx === targetIdx
-              ? { ...item, status: isSlip && !slip ? "error" as const : "done" as const, ...(!isSlip || slip ? { extractionVersion: EXTRACTION_VERSION } : {}), ...(isSlip && slip ? { data: { ...slip, warnings: [...slip.warnings, ...ocrWarning, ...(slipQrWarning ? [slipQrWarning] : [])] }, sourceBounds: currentSlipCandidate?.bounds, ocrTextBoxes: currentSlipCandidate?.ocrTextBoxes, ocrDiagnosticTrace: currentOcrTrace || currentSlipCandidate?.ocrDiagnosticTrace, qrScanDiagnostic: qrScanDiagnosticsByPage.get(`${item.id}:slip`), isConfirmed: false } : {}), ...(slipExtractionStatus ? { error: slipExtractionStatus.error } : {}), processingWarnings: [...(item.processingWarnings || []), ...ocrWarning, ...(slipQrWarning ? [slipQrWarning] : []), ...Array.from(qrDecoderDiagnosticsByItem.get(item.id) || []), ...Array.from(ocrRetryDiagnosticsByItem.get(item.id) || []), ...(slipExtractionStatus?.warnings || [])], meta, isDuplicate: false, duplicateOfRef: undefined }
+              ? { ...item, status: isSlip && !slip ? "error" as const : "done" as const, ...(!isSlip || slip ? { extractionVersion: EXTRACTION_VERSION } : {}), ...(isSlip && slip ? { data: { ...slip, warnings: [...slip.warnings, ...ocrWarning, ...(slipQrWarning ? [slipQrWarning] : [])] }, sourceBounds: currentSlipCandidate?.bounds, ocrTextBoxes: currentSlipCandidate?.ocrTextBoxes, ocrDiagnosticTrace: currentOcrTrace || currentSlipCandidate?.ocrDiagnosticTrace, qrScanDiagnostic: qrScanDiagnosticsByPage.get(`${item.id}:slip`), fieldCrops: standaloneFieldCrops, fieldQualitySummary: standaloneFieldQualitySummary, isConfirmed: false } : {}), ...(slipExtractionStatus ? { error: slipExtractionStatus.error } : {}), processingWarnings: [...(item.processingWarnings || []), ...ocrWarning, ...(slipQrWarning ? [slipQrWarning] : []), ...Array.from(qrDecoderDiagnosticsByItem.get(item.id) || []), ...Array.from(ocrRetryDiagnosticsByItem.get(item.id) || []), ...(slipExtractionStatus?.warnings || [])], meta, isDuplicate: false, duplicateOfRef: undefined }
             : item
         );
         // Append to Chain of Custody Hash Manifest

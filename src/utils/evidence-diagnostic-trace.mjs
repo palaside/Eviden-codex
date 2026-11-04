@@ -40,9 +40,18 @@ function getFieldConflicts(candidate) {
   return conflicts;
 }
 
+function stripFieldCropData(fieldCrops) {
+  return (fieldCrops || []).map((field) => {
+    const sanitized = { ...field };
+    delete sanitized.cropDataUrl;
+    return sanitized;
+  });
+}
+
 function candidateTrace(candidate, source) {
   if (!candidate) return null;
-  const record = Object.fromEntries(Object.entries(candidate).filter(([key]) => key !== "cropDataUrl" && key !== "ocrDiagnosticTrace"));
+  const record = Object.fromEntries(Object.entries(candidate).filter(([key]) => key !== "cropDataUrl" && key !== "ocrDiagnosticTrace" && key !== "fieldCrops"));
+  if (candidate.fieldCrops) record.fieldCrops = stripFieldCropData(candidate.fieldCrops);
   const fieldEvidence = {};
   for (const box of candidate.ocrTextBoxes || []) {
     for (const field of box.supportsFields || []) {
@@ -76,6 +85,8 @@ function getCandidates(item) {
       data: item.data,
       sourceBounds: item.sourceBounds,
       ocrTextBoxes: item.ocrTextBoxes,
+      fieldCrops: item.fieldCrops,
+      fieldQualitySummary: item.fieldQualitySummary,
       ocrDiagnosticTrace: item.ocrDiagnosticTrace,
       qrScanDiagnostic: item.qrScanDiagnostic,
       isConfirmed: item.isConfirmed,

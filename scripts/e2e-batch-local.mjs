@@ -9,6 +9,7 @@ const limit = Number(process.env.E2E_BATCH_LIMIT || 20);
 const requestedRoots = (process.env.E2E_FIXTURE_ROOTS || "For Test\\แชทที่ 1;For Test\\แชทที่ 2;For Test\\แชทที่ 3;For Test\\Done").split(";").filter(Boolean);
 const offset = Math.max(0, Number(process.env.E2E_BATCH_OFFSET || 0));
 const processingTimeoutMs = Math.max(120_000, Number(process.env.E2E_PROCESS_TIMEOUT_MS || 600_000));
+const requireReviewDerivedPreview = process.env.E2E_REQUIRE_REVIEW_DERIVED_PREVIEW !== "false";
 const allFiles = [];
 for (const relativeRoot of requestedRoots) {
   const absoluteRoot = path.resolve(root, relativeRoot);
@@ -133,4 +134,5 @@ const report = {
 };
 await fs.writeFile(path.join(outDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
 console.log(JSON.stringify({ outDir, processed: report.processed, failed: report.failed, candidatesDetected: report.candidatesDetected, traceCandidates: report.traceCandidates, amountPresent: report.amountPresent, referencePresent: report.referencePresent, senderNamePresent: report.senderNamePresent, receiverNamePresent: report.receiverNamePresent, needsReview: report.needsReview, sourceSha256Present: report.sourceSha256Present, sourcePagePresent: report.sourcePagePresent, providerCalls: report.providerCalls, consoleErrorCases: report.consoleErrorCases, pageErrorCases: report.pageErrorCases }, null, 2));
-if (report.failed > 0 || report.providerCalls > 0 || report.pageErrorCases > 0 || report.results.some((item) => item.assertions?.reviewDerivedPreviewVisible === false)) process.exitCode = 1;
+if (report.failed > 0 || report.providerCalls > 0 || report.pageErrorCases > 0
+  || (requireReviewDerivedPreview && report.results.some((item) => item.assertions?.reviewDerivedPreviewVisible === false))) process.exitCode = 1;

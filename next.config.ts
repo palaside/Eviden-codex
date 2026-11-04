@@ -4,6 +4,11 @@ import path from 'path';
 const nextConfig: NextConfig = {
   distDir: process.env.NEXT_DIST_DIR || (process.env.NODE_ENV === 'development' ? '.next-dev' : '.next'),
   allowedDevOrigins: ['127.0.0.1', 'localhost'],
+  // Keep Windows production builds deterministic; parallel static workers can
+  // race while creating nested .next directories and surface EPERM.
+  experimental: {
+    cpus: 1,
+  },
   // Resolve Turbopack root to an absolute path – avoid EPERM errors on Windows drives
   turbopack: {
     root: path.resolve(process.cwd()),
