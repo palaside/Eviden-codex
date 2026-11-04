@@ -35,6 +35,19 @@ export function toTemplateFieldName(field) {
   return entry ? entry[0] : field;
 }
 
+const OCR_FIELD_ALIASES = Object.freeze({
+  reference: ["referenceNo"],
+  reference_no: ["referenceNo"],
+  date_time: ["transactionDate", "transactionTime"],
+  sender_bank: ["senderBank", "bank"],
+  receiver_bank: ["receiverBank", "bank"],
+  bank: ["bank"],
+});
+
+function expandOcrField(field) {
+  return OCR_FIELD_ALIASES[field] || [toTemplateFieldName(field)];
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -77,13 +90,14 @@ export function mergeTemplateAndOcrFields(plan = {}, ocrTextBoxes = []) {
   const entries = new Map(Object.entries(plan));
   for (const box of ocrTextBoxes) {
     for (const field of box.supportsFields || []) {
-      const templateField = toTemplateFieldName(field);
-      if (!entries.has(templateField)) entries.set(templateField, { field: templateField, source: "template_region_only", bounds: box.bounds });
+      for (const templateField of expandOcrField(field)) {
+        if (!entries.has(templateField)) entries.set(templateField, { field: templateField, source: "ocr_evidence", bounds: box.bounds });
+      }
     }
   }
   return [...entries.values()].map((entry) => {
     const boxes = ocrTextBoxes
-      .filter((box) => (box.supportsFields || []).some((field) => toTemplateFieldName(field) === entry.field))
+      .filter((box) => (box.supportsFields || []).some((field) => expandOcrField(field).includes(entry.field)))
       .sort((left, right) => Number(right.confidence || 0) - Number(left.confidence || 0));
     return {
       field: entry.field,

@@ -2262,7 +2262,11 @@ export default function MasterEvidenceWorkspace() {
           );
         }
 
-        const standaloneFieldCrops = isSlip && slip && currentSlipCandidate
+        const standaloneSourceDataUrl = isSlip && slip && currentSlipCandidate
+          ? await fileToPngDataUrl(targetItem.processingFile || targetItem.file)
+          : null;
+        const standaloneSourceDimensions = currentSlipCandidate?.ocrDiagnosticTrace?.sourceDimensions;
+        const standaloneFieldCrops = isSlip && slip && currentSlipCandidate && standaloneSourceDataUrl
           ? await buildLocalFieldCrops({
             id: `${targetItem.id}-standalone-slip`,
             extractionVersion: EXTRACTION_VERSION,
@@ -2270,8 +2274,13 @@ export default function MasterEvidenceWorkspace() {
             sourceFileName: targetItem.file.name,
             sourceSha256: sha256,
             data: slip,
-            sourceBounds: currentSlipCandidate.bounds,
-            cropDataUrl: currentSlipCandidate.cropDataUrl,
+            sourceBounds: standaloneSourceDimensions
+              ? { x: 0, y: 0, width: standaloneSourceDimensions.width, height: standaloneSourceDimensions.height }
+              : currentSlipCandidate.bounds,
+            // OCR boxes are in the source-image coordinate system. Use the
+            // full original/processing image here so crop coordinates and raw
+            // OCR evidence stay in the same provenance space.
+            cropDataUrl: standaloneSourceDataUrl,
             ocrTextBoxes: currentSlipCandidate.ocrTextBoxes,
             ocrDiagnosticTrace: currentSlipCandidate.ocrDiagnosticTrace,
             chatPageNumber: 1,

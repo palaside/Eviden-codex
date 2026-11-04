@@ -53,6 +53,17 @@ test("retains an OCR-only bank field with its evidence bounds", () => {
   assert.deepEqual(fields[0].bounds, { x: 10, y: 20, width: 80, height: 18 });
 });
 
+test("expands OCR aliases into field evidence instead of dropping them", () => {
+  const fields = mergeTemplateAndOcrFields({}, [
+    { text: "04 เม.ย. 2568 - 16:06", confidence: 0.93, bounds: { x: 10, y: 20, width: 300, height: 24 }, supportsFields: ["date_time"] },
+    { text: "กรุงศรี", confidence: 0.94, bounds: { x: 10, y: 50, width: 80, height: 18 }, supportsFields: ["receiver_bank"] },
+    { text: "A785efee8358b4e89", confidence: 0.99, bounds: { x: 10, y: 80, width: 180, height: 18 }, supportsFields: ["reference"] },
+  ]);
+  assert.deepEqual(fields.map((field) => field.field), ["transactionDate", "transactionTime", "receiverBank", "bank", "referenceNo"]);
+  assert.equal(fields.find((field) => field.field === "transactionDate").ocrBox.text, "04 เม.ย. 2568 - 16:06");
+  assert.equal(fields.find((field) => field.field === "bank").source, "ocr_evidence");
+});
+
 test("merges snake_case OCR evidence into the matching template field", () => {
   const plan = buildTemplateFieldPlan(getSlipTemplate("ttb-slip-v1"), { width: 1000, height: 1000 });
   const fields = mergeTemplateAndOcrFields(plan, [
