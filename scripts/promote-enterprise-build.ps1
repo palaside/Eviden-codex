@@ -9,8 +9,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$sourcePath = Join-Path $projectRoot $BuildSource
-$targetPath = Join-Path $projectRoot $BuildTarget
+$sourcePath = if ([System.IO.Path]::IsPathRooted($BuildSource)) { $BuildSource } else { Join-Path $projectRoot $BuildSource }
+$targetPath = if ([System.IO.Path]::IsPathRooted($BuildTarget)) { $BuildTarget } else { Join-Path $projectRoot $BuildTarget }
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourcePath "BUILD_ID"))) {
   throw "Production build is incomplete: $sourcePath\BUILD_ID was not found"
