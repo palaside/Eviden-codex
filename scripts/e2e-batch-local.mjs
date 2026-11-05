@@ -132,6 +132,8 @@ for (const [index, fixture] of fixtures.entries()) {
     results.push(result);
     await writePartialReport();
     await page.close();
+    // Optional orchestration barrier: persist checkpoint/stop before next upload.
+    await globalThis[Symbol.for("digital-evidence.batch-result")]?.(result);
   }
 }
 await browser.close();

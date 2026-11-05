@@ -1,0 +1,71 @@
+# CURRENT TASK 2 REPORT — Batch 500 Resumable Runner (2026-11-05)
+
+This report replaces stale Task 2 reports from another plan. Its only authority is `.superpowers/sdd/task-2-brief.md` and Task 2 of `docs/superpowers/plans/2026-11-05-batch500-reboot-cleanup-audit.md`.
+
+## Status
+
+Implemented and focused checks passed. Acceptance is PARTIAL: the real 10-image pilot was deliberately stopped at the user's request after two completed images; the full 10-image pilot and browser resume proof are NOT complete. No full 500-image run occurred.
+
+Workspace: `D:\Project\Digital Evi - Codex`.
+Branch: `codex/task-1-contract` (the existing branch; no alternate workspace).
+Base commit: `4db45831655d06775600b1ba8a51496d0742059d`.
+The accompanying commit contains the Task 2 sources, tests, this report and the necessary two-line Task 1 integration hook described below. Generated evidence is retained locally and excluded from the commit.
+
+## Implementation and acceptance mapping
+
+- Created `scripts/run-batch500-resumable.mjs`, `scripts/run-batch500-resumable.ps1`, and `scripts/tests/run-batch500-resumable.test.mjs`.
+- CLI supports `--base-url`, `--fixture-roots`, `--out-dir`, `--build-dir`, `--batch-spec`, `--resume`. Additional `--batch-id 001` selects only the pilot while preserving the complete seven-range manifest layout. Resume uses `--resume --out-dir <existing-run>`.
+- Exact default layout: `001:0:10,002:10:50,003:60:100,004:160:100,005:260:100,006:360:100,007:460:40`. Rejects gaps, overlap, duplicate IDs, invalid counts, or coverage other than 500.
+- Inventory reads direct PNG/JPEG files from the supplied approved roots, deduplicates overlapping absolute paths, sorts absolute paths by deterministic ordinal order, and selects the first 500. Fewer than 500 fails closed. This follows the full plan's instruction to limit inventory to exactly 500; it does not process every file under those roots. Each record includes absolute fixturePath, size, ISO modifiedTime, and source SHA-256.
+- The four existing default roots contain 3,266 direct images. The selected manifest has exactly 500 records, representing 446 unique SHA values. Selection order and resulting SHA list are recorded in the immutable manifest. Duplicate source occurrences remain distinct inventory records.
+- Uses the Task 1 manifest/checkpoint functions without modifying the contract module. CLI resume compares identity derived from current build ID, git commit, processing version, freshly hashed inventory and batch layout. runBatch also checks checkpoint compatibility and rehashes selected source files before skipping completed items.
+- `runBatch({ manifestPath, batchId, offset, limit, runner })` invokes the injected browser adapter once per nonempty pending range, using the existing e2e browser runner and a fresh UUID output directory. Explicit pending fixture paths prevent offset drift on resume; offset/limit/base URL/build/executable environment remain available to the original runner.
+- Each completed image is acknowledged over IPC only after its atomic checkpoint write. The child awaits this acknowledgement before continuing. Completion requires Task 1's processing-complete status plus a parseable trace containing the same source SHA. review_required stays independent of processing completion. Duplicate occurrences have skipped_duplicate records pointing to the completed original and preserve its review status.
+- Batch start, per-image results, failure and completion are checkpointed. Fresh runs refuse existing run directories; every browser attempt has a fresh evidence directory. No prior trace/report directory is reused.
+- Provider/quota failures are checkpointed and stop the child at the per-image barrier. A persisted stopReason blocks subsequent automatic resume; no automatic retry loop exists. Existing provider-blocking routes and OCR/browser assertions are unchanged.
+- PowerShell checks service RUNNING, HTTP 200, local BUILD_ID, the build ID rendered in HTTP HTML, and git identity before each selected batch. It stops on mismatch. HTTP build extraction uses the current app's Next flight `b` field and fails closed when that field is unavailable.
+
+## Necessary Task 1 integration exception
+
+Modified `scripts/e2e-batch-local.mjs` by exactly two added lines after writePartialReport and page.close: an explanatory comment and an awaited optional `globalThis[Symbol.for("digital-evidence.batch-result")]?.(result)` hook.
+
+Reason: the old runner writes a partial report but has no awaited notification/stop contract. Watching that file cannot guarantee checkpoint completion or provider/quota stop before the next upload. The integration-contract test failed before the hook was added. The new adapter installs it only in its browser child; standalone Task 1 behavior remains unchanged when the hook is absent. No OCR algorithm, browser assertion, provider configuration, dependency or Task 1 contract implementation was changed.
+
+## TDD and focused verification
+
+1. Initial RED: `node --test scripts/tests/run-batch500-resumable.test.mjs` failed with ERR_MODULE_NOT_FOUND for the missing runner, before implementation.
+2. With implementation present, six behavioral tests passed and the awaited browser integration contract failed; only then was the minimal Task 1 hook added.
+3. Additional regressions for changed completed-source bytes and accountable duplicate occurrences both failed before their corrections and subsequently passed.
+4. Final focused/regression command: `node --test scripts/tests/run-batch500-resumable.test.mjs scripts/tests/batch500-contract.test.mjs` — **22 passed, 0 failed** (9 Task 2 tests + 13 Task 1 tests).
+5. `node --check scripts/run-batch500-resumable.mjs` and PowerShell parser checks passed. Diff whitespace checks passed before commit.
+6. Wrapper negative-path checks used scoped shell function stubs: stopped service, HTTP 503, and HTTP 200 with wrong rendered build all stopped before browser launch. These are simulations, not real service transitions.
+
+The Windows sandbox initially denied atomic renames inside its redirected temporary folder. The existing Task 1 regression passed outside that restriction; final tests also passed with TEMP/TMP directed to the workspace's retained test-evidence folder. The contract was not weakened to accommodate the sandbox.
+
+## Real browser pilot: partial, stopped safely
+
+Command: `$env:E2E_EXECUTABLE_PATH = 'C:\Program Files\Google\Chrome\Application\chrome.exe'; ./scripts/run-batch500-resumable.ps1 -OutDir 'For Test Results/task2-pilot-20261105-current-01' -BatchId '001'`.
+
+- Target: `http://127.0.0.1:3450/`; actual Windows service `digitalevidenceenterprise.exe` was RUNNING; HTTP returned 200.
+- Local and HTTP-rendered build ID: `3ev1rjPH98s3lb5aLS_7A`.
+- Pilot manifest git identity: base commit 4db45831655d06775600b1ba8a51496d0742059d, before this Task 2 commit.
+- Runtime evidence directory: `For Test Results/task2-pilot-20261105-current-01/`.
+- Browser evidence directory: `batch-001-c0737d24-f38f-404c-a2a7-1a576f8f14a5/` under that run directory.
+- Two real inputs completed: `For Test/Done/A4_IMG_ (1).JPEG` and `For Test/Done/A4_IMG_ (1).PNG`. The unchanged runner exercised upload, processing, summary table and JSON trace export. Both records have processingStatus=completed and status=review_required. Their JSON traces parse and contain matching source SHA values.
+- On the user's instruction to stop rather than wait indefinitely, only this pilot's browser worker was terminated after checking its parent command matched the pilot. The orchestration parent remained alive, captured child exit 4294967295, atomically wrote the failed batch state and exited. No service was stopped or restarted.
+- Final checkpoint: 10 accountable records, 2 completed, 8 not_run, batch 001 failed due to intentional interruption. One of those eight may have been in progress when interrupted: not_run here does not prove no attempt or no local processing occurred. No complete trace for that interrupted item was claimed.
+- `stopped-pilot-proof.json` records: completed=2, reviewRequired=2, completedTracesProven=2, uniqueCompletedSHA=2, completedWouldBeResent=0.
+- Resume evidence has two levels: the focused test actually invokes runBatch a second time and proves zero runner calls for completed synthetic fixtures; the real checkpoint's pending calculation excludes both completed real SHA values. A second browser invocation on the real pilot was NOT run, since it would process remaining images after the user requested stopping. Do not label this a completed browser resume proof.
+- The pilot used the earlier in-memory runner revision from its launch. Later focused corrections added source-rehash-before-skip and duplicate-accounting checks; those corrections passed focused tests but were not rerun through a new live browser pilot.
+
+## Approval review and remaining concerns
+
+Automatic approval review initially rejected the pilot because evidence or derivatives might be sent to an external provider. Before retrying, source inspection established that the existing browser runner aborts `/api/slips/extract` (Gemini), `/api/slips/slipvision`, and `/api/legal/tlex` before uploading; the Gemini action is a separate UI button that the runner never clicks, while local-slip-ocr uses browser Tesseract. The evidence-backed retry was approved and started. No provider or security setting was changed.
+
+Remaining gaps / limits:
+
+- The requested complete 10-image pilot and real browser resume proof remain incomplete by explicit user instruction; overall Task 2 E2E acceptance is partial.
+- Full 500-image execution and batches 002–007 were not run, as required. No reboot, deployment, dependency, auth, database, Xerox skill or provider work was performed.
+- Concurrent orchestration processes against one run directory are not supported or tested; use one wrapper at a time.
+- The committed git identity differs from the pre-commit pilot manifest. Resuming that pilot after this commit must fail the git identity guard; start a fresh run for post-commit validation rather than editing its old manifest.
+- No files were deliberately deleted, no original fixtures were changed, and previous evidence directories were preserved. Test fixtures/logs and pilot artifacts are untracked local evidence and are not included in the Task 2 commit.
