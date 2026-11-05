@@ -4,6 +4,7 @@ import path from "node:path";
 const root = process.cwd();
 const resultsRoot = path.resolve(root, "For Test Results");
 const outDir = path.join(resultsRoot, "enterprise-acceptance-audit-current");
+const currentBuildDir = process.env.ENTERPRISE_CURRENT_DIST_DIR || "build-output-audit-export-20261105";
 await fs.mkdir(outDir, { recursive: true });
 
 async function readJson(relativePath) {
@@ -30,6 +31,8 @@ const fourCorners = await readJson("For Test Results/enterprise-fourcorners-e2e-
 const supervisorProcess = await readJson("For Test Results/enterprise-supervisor-process-3455/report.json");
 const humanCorrection = await readJson("For Test Results/enterprise-ocr-human-correction-3450/report.json");
 const ocrBenchmark = await readJson("For Test Results/enterprise-ocr-groundtruth-benchmark-3450/report.json");
+const latestFieldAudit = await readJson("For Test Results/e2e-local-runtime-fix-3451-20261105/field-audit-summary.json");
+const latestExport = await readJson("For Test Results/export-local-e2e-3463/report.json");
 const geminiOcr = await readJson("For Test Results/enterprise-gemini-ocr-26400-3450/report.json");
 let windowsServiceInstalled = false;
 try {
@@ -68,6 +71,15 @@ const checks = {
   windows_service_installed: windowsServiceInstalled,
   ocr_human_correction_e2e: humanCorrection.passed === true
     && humanCorrection.steps?.every((step) => step.ok !== false),
+  latest_field_provenance_audit: latestFieldAudit.allFieldEvidencePresent === true
+    && latestFieldAudit.overallReviewRequired === true
+    && latestFieldAudit.candidates?.every((candidate) => candidate.sourceSha256Present === true && candidate.candidateReview === true),
+  latest_local_export_e2e: latestExport.steps?.every((step) => step.ok === true)
+    && latestExport.assertions?.pdfNonEmpty === true
+    && latestExport.assertions?.sfxNonEmpty === true
+    && latestExport.assertions?.noProviderCall === true
+    && latestExport.assertions?.consoleErrors === 0
+    && latestExport.assertions?.pageErrors === 0,
   ocr_groundtruth_sample_complete: ocrBenchmark.cases?.length === 3
     && ocrBenchmark.cases.every((testCase) => testCase.passed === true),
   gemini_provider_e2e_review_only: geminiOcr.passed === true
@@ -78,6 +90,10 @@ const checks = {
     && /429|quota|RESOURCE_EXHAUSTED|503|UNAVAILABLE/iu.test(geminiOcr.providerResponse?.message || "")
     && geminiOcr.ui?.reviewOnlyVisible === true,
   enterprise_build_present: await exists("build-output-enterprise/BUILD_ID"),
+  enterprise_build_matches_current: await exists(`${currentBuildDir}/BUILD_ID`)
+    && await exists("build-output-enterprise/BUILD_ID")
+    && (await fs.readFile(path.join(root, currentBuildDir, "BUILD_ID"), "utf8")).trim()
+      === (await fs.readFile(path.join(root, "build-output-enterprise", "BUILD_ID"), "utf8")).trim(),
 };
 
 const optionalExternalChecks = new Set(["gemini_provider_e2e_review_only"]);
@@ -91,6 +107,9 @@ if (!checks.windows_service_installed) {
   blockers.push("ยังไม่ได้ติดตั้งเป็น Windows Service จริง (application supervisor ผ่านแล้ว)");
 }
 if (!checks.ocr_human_correction_e2e) blockers.push("ยังไม่มีหลักฐาน E2E การแก้ไขชื่อโดยผู้ใช้และการคง provenance");
+if (!checks.latest_field_provenance_audit) blockers.push("field-level provenance audit ชุดล่าสุดยังไม่ผ่าน");
+if (!checks.latest_local_export_e2e) blockers.push("local export E2E ชุดล่าสุดยังไม่ผ่านครบ");
+if (!checks.enterprise_build_matches_current) blockers.push(`service artifact ยังไม่ตรงกับ build ปัจจุบัน (${currentBuildDir})`);
 if (!checks.ocr_groundtruth_sample_complete) blockers.push("OCR ground-truth sample ยังไม่ผ่านครบทุก fixture");
 
 const audit = {
@@ -118,9 +137,12 @@ const audit = {
     fourCorners: "For Test Results/enterprise-fourcorners-e2e-3450/report.json",
     supervisor: "For Test Results/enterprise-supervisor-process-3455/report.json",
     humanCorrection: "For Test Results/enterprise-ocr-human-correction-3450/report.json",
+    latestFieldAudit: "For Test Results/e2e-local-runtime-fix-3451-20261105/field-audit-summary.json",
+    latestExport: "For Test Results/export-local-e2e-3463/report.json",
     ocrBenchmark: "For Test Results/enterprise-ocr-groundtruth-benchmark-3450/report.json",
     geminiOcr: "For Test Results/enterprise-gemini-ocr-26400-3450/report.json",
     serviceInstall: "For Test Results/enterprise-service-install-20261028/report.json",
+    currentBuildDir,
   },
 };
 

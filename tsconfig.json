@@ -39,7 +39,13 @@
     ".next-e2e-current/types/**/*.ts",
     ".next-e2e-current/dev/types/**/*.ts",
     ".next-dev/types/**/*.ts",
-    ".next-dev/dev/types/**/*.ts"
+    ".next-dev/dev/types/**/*.ts",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts",
+    ".next-task5-38774-final/types/**/*.ts",
+    ".next-task5-38774-final/dev/types/**/*.ts",
+    ".next-task5-38773-final/types/**/*.ts",
+    ".next-task5-38773-final/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

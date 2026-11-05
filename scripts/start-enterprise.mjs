@@ -9,9 +9,14 @@ export function buildStartEnvironment(environment = process.env) {
   };
 }
 
+export function buildStartArgs(args = []) {
+  const hasHostname = args.some((arg, index) => arg === "-H" || arg === "--hostname" || arg.startsWith("--hostname="));
+  return hasHostname ? [...args] : ["-H", "127.0.0.1", ...args];
+}
+
 function run() {
   const nextBin = path.resolve("node_modules", "next", "dist", "bin", "next");
-  const child = spawn(process.execPath, [nextBin, "start", ...process.argv.slice(2)], {
+  const child = spawn(process.execPath, [nextBin, "start", ...buildStartArgs(process.argv.slice(2))], {
     stdio: "inherit",
     env: buildStartEnvironment(),
   });

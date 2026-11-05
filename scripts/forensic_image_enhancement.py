@@ -145,10 +145,21 @@ def main() -> None:
     )
     target_ocr = cv2.resize(outputs["05_unsharp_laplacian"], target_size, interpolation=cv2.INTER_CUBIC)
     target_binary = cv2.resize(outputs["06_adaptive_threshold"], target_size, interpolation=cv2.INTER_NEAREST)
+    # Keep a color derived view for bank logos and color-dependent OCR. The
+    # grayscale variants remain available for diagnostics; this view is never
+    # treated as the original evidence.
+    target_color = cv2.resize(image, target_size, interpolation=cv2.INTER_LANCZOS4)
+    target_color_blur = cv2.GaussianBlur(target_color, (0, 0), sigmaX=1.0)
+    target_color = cv2.addWeighted(target_color, 1.25, target_color_blur, -0.25, 0)
     for name, output in (("09_target_300dpi_ocr", target_ocr), ("10_target_300dpi_binary", target_binary)):
         if not cv2.imwrite(str(args.output_dir / f"{name}.png"), output):
             raise RuntimeError(f"เขียนภาพ DPI derived ไม่สำเร็จ: {name}")
         Image.fromarray(output).save(args.output_dir / f"{name}_metadata.png", dpi=(args.target_dpi, args.target_dpi))
+    if not cv2.imwrite(str(args.output_dir / "11_target_300dpi_color.png"), target_color):
+        raise RuntimeError("เขียนภาพสี derived ไม่สำเร็จ")
+    Image.fromarray(cv2.cvtColor(target_color, cv2.COLOR_BGR2RGB)).save(
+        args.output_dir / "11_target_300dpi_color_metadata.png", dpi=(args.target_dpi, args.target_dpi)
+    )
     manifest = {
         "source": {"file_name": args.image.name, "sha256": hashlib.sha256(raw).hexdigest()},
         "source_bbox": source_bbox,

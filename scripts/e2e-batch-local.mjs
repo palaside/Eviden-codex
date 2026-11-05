@@ -1,6 +1,7 @@
 import { chromium } from "@playwright/test";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { auditTraceCandidates } from "./e2e-field-audit.mjs";
 
 const root = process.cwd();
 const baseUrl = process.env.E2E_BASE_URL || "http://127.0.0.1:3450/";
@@ -69,8 +70,17 @@ for (const [index, fixture] of fixtures.entries()) {
     const tracePath = path.join(outDir, `${String(index + 1).padStart(3, "0")}-trace.json`);
     await traceDownload.saveAs(tracePath);
     const trace = JSON.parse(await fs.readFile(tracePath, "utf8"));
+    // Inspect the same evidence table a reviewer uses; canvas visibility
+    // alone is not enough to prove field trace/overlay propagation to UI.
+    await page.getByRole("button", { name: /ตารางสรุปหลักฐาน/ }).click();
+    await page.getByText(/ตารางสรุปรายการทางการเงินที่ตรวจพบ/).waitFor({ state: "visible", timeout: 30_000 });
+    const reviewBody = await page.locator("body").innerText();
     const traceItems = Array.isArray(trace.items) ? trace.items : [];
     const traceCandidates = traceItems.flatMap((item) => Array.isArray(item.candidates) ? item.candidates : []);
+    const fieldAudit = auditTraceCandidates(traceItems.flatMap((item) => (Array.isArray(item.candidates) ? item.candidates.map((candidate) => ({
+      ...candidate,
+      sourceSha256: candidate.sourceSha256 || item.source?.sha256 || item.sourceSha256,
+    })) : [])));
     const traceData = traceCandidates.map((candidate) => candidate.data || {});
     const traceCandidateItems = traceItems.flatMap((item) => (Array.isArray(item.candidates) ? item.candidates.map((candidate) => ({ item, candidate })) : []));
     result.steps.push({ name: "upload-and-process", ok: true });
@@ -87,13 +97,14 @@ for (const [index, fixture] of fixtures.entries()) {
       needsReview: traceCandidates.filter((candidate) => candidate.needsReview === true && candidate.isConfirmed !== true).length,
       sourceSha256Present: traceCandidateItems.filter(({ item, candidate }) => typeof (candidate.sourceSha256 || candidate.source?.sha256 || item.source?.sha256) === "string" && (candidate.sourceSha256 || candidate.source?.sha256 || item.source?.sha256).length === 64).length,
       sourcePagePresent: traceCandidateItems.filter(({ item, candidate }) => Number.isInteger(candidate.chatPageNumber) || Number.isInteger(candidate.dossierPageNumber) || (Array.isArray(item.chatPages) && item.chatPages.length > 0)).length,
-      searchableOverlayVisible: body.includes("Searchable text overlay"),
-      enhancementArtifactsVisible: body.includes("Enhancement artifacts"),
+      searchableOverlayVisible: reviewBody.includes("Searchable text overlay"),
+      enhancementArtifactsVisible: reviewBody.includes("Enhancement artifacts"),
       reviewDerivedPreviewVisible: body.includes("ภาพอนุพันธ์ Upscayl สำหรับช่วยดู/อ่าน"),
       stitchAuditVisible: body.includes("Stitch audit"),
       noExternalProviderCall: !result.apiResponses.some((item) => item.url.includes("/api/slips/extract")),
       consoleErrors: result.consoleErrors.length,
       pageErrors: result.pageErrors.length,
+      fieldAudit,
     };
     if (candidateCount > 0 || result.consoleErrors.length || result.pageErrors.length) {
       await page.screenshot({ path: path.join(outDir, `${String(index + 1).padStart(3, "0")}-${path.parse(fixture).name.replace(/[^a-zA-Z0-9_-]+/g, "_")}.png`), fullPage: true });
@@ -127,12 +138,16 @@ const report = {
   enhancementArtifactsVisible: results.filter((item) => item.assertions?.enhancementArtifactsVisible).length,
   stitchAuditVisible: results.filter((item) => item.assertions?.stitchAuditVisible).length,
   reviewDerivedPreviewVisible: results.filter((item) => item.assertions?.reviewDerivedPreviewVisible).length,
-  providerCalls: results.reduce((sum, item) => sum + (item.assertions?.noExternalProviderCall ? 0 : 1), 0),
+  // Count only an observed blocked/provider route. Error cases may not have
+  // assertions at all and must not be misclassified as provider calls.
+  externalProviderCalls: results.filter((item) => Boolean(item.externalProviderCall)).length,
   consoleErrorCases: results.filter((item) => (item.assertions?.consoleErrors || 0) > 0).length,
   pageErrorCases: results.filter((item) => (item.assertions?.pageErrors || 0) > 0).length,
+  fieldAuditPassed: results.filter((item) => item.assertions?.fieldAudit?.passed === true).length,
   results,
 };
 await fs.writeFile(path.join(outDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
-console.log(JSON.stringify({ outDir, processed: report.processed, failed: report.failed, candidatesDetected: report.candidatesDetected, traceCandidates: report.traceCandidates, amountPresent: report.amountPresent, referencePresent: report.referencePresent, senderNamePresent: report.senderNamePresent, receiverNamePresent: report.receiverNamePresent, needsReview: report.needsReview, sourceSha256Present: report.sourceSha256Present, sourcePagePresent: report.sourcePagePresent, providerCalls: report.providerCalls, consoleErrorCases: report.consoleErrorCases, pageErrorCases: report.pageErrorCases }, null, 2));
-if (report.failed > 0 || report.providerCalls > 0 || report.pageErrorCases > 0
+console.log(JSON.stringify({ outDir, processed: report.processed, failed: report.failed, candidatesDetected: report.candidatesDetected, traceCandidates: report.traceCandidates, amountPresent: report.amountPresent, referencePresent: report.referencePresent, senderNamePresent: report.senderNamePresent, receiverNamePresent: report.receiverNamePresent, needsReview: report.needsReview, sourceSha256Present: report.sourceSha256Present, sourcePagePresent: report.sourcePagePresent, externalProviderCalls: report.externalProviderCalls, consoleErrorCases: report.consoleErrorCases, pageErrorCases: report.pageErrorCases }, null, 2));
+if (report.failed > 0 || report.externalProviderCalls > 0 || report.pageErrorCases > 0
+  || report.results.some((item) => item.assertions?.fieldAudit?.passed !== true)
   || (requireReviewDerivedPreview && report.results.some((item) => item.assertions?.reviewDerivedPreviewVisible === false))) process.exitCode = 1;

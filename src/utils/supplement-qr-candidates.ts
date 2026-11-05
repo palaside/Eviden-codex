@@ -131,9 +131,10 @@ function mergeMissingQrFields(qr: LocalSlipCandidate, ocr: LocalSlipCandidate, m
   const referenceNo = qrData.transaction.reference_no ?? ocrData.transaction.reference_no;
   const date = qrData.transaction.date ?? ocrData.transaction.date;
   const time = qrData.transaction.time ?? ocrData.transaction.time;
+  const ocrEvidencedBank = ocrData.bank.name || ocrData.sender.bank || null;
   const bankName = qrData.bank.name && !qrData.bank.name.includes("ตรวจพบ QR e-Slip")
     ? qrData.bank.name
-    : ocrData.bank.name || qrData.bank.name;
+    : ocrEvidencedBank || qrData.bank.name;
   const receiverName = qrData.receiver.name || ocrData.receiver.name;
   const senderName = qrData.sender.name || ocrData.sender.name;
 
@@ -148,7 +149,11 @@ function mergeMissingQrFields(qr: LocalSlipCandidate, ocr: LocalSlipCandidate, m
       bank: {
         ...qrData.bank,
         name: bankName,
-        confidence: qrData.bank.name && bankName === qrData.bank.name ? qrData.bank.confidence : ocrData.bank.confidence,
+        confidence: qrData.bank.name && bankName === qrData.bank.name
+          ? qrData.bank.confidence
+          : ocrData.bank.name
+            ? ocrData.bank.confidence
+            : ((ocrData.confidence as Record<string, number | undefined>).sender_bank ?? 0),
       },
       receiver: {
         ...qrData.receiver,

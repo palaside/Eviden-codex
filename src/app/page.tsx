@@ -258,6 +258,17 @@ function selectBestSlipCandidate<T extends { data: SlipExtraction }>(candidates:
     write(choice.value);
     (merged.confidence as Record<string, number>)[field] = choice.confidence;
   }
+  // A QR payload can leave the top-level bank unknown while the same OCR
+  // candidate has direct sender-bank evidence. Promote that evidence only
+  // when the structured bank is absent/unknown; never replace a known QR/OCR
+  // bank and never infer from the receiver bank.
+  if (!present(merged.bank.name) || String(merged.bank.name).includes("ธนาคารไม่ระบุ")) {
+    const senderBankChoice = chooseField("sender_bank", (data) => data.sender.bank);
+    if (senderBankChoice) {
+      merged.bank.name = String(senderBankChoice.value);
+      merged.bank.confidence = senderBankChoice.confidence;
+    }
+  }
   const qrReference = qrCandidate.data.transaction.reference_no;
   if (present(qrReference)) {
     merged.transaction.reference_no = qrReference;
@@ -1576,6 +1587,9 @@ export default function MasterEvidenceWorkspace() {
         return {
           ...item,
           processingFile: selected.file,
+          // Let the review canvas use the durable legacy derived preview until
+          // an explicit research artifact is selected by the reviewer.
+          selectedReviewArtifactId: "",
           reviewPreviewUrl: payload.derivedImage,
           enhancementArtifact: { ...payload.metadata, status: payload.metadata.status || "success", reviewOnly: true },
           processingWarnings: [...(item.processingWarnings || []), "QR/OCR ใช้ภาพอนุพันธ์จาก Upscayl; ต้นฉบับและ SHA-256 ไม่เปลี่ยน"],
@@ -2931,12 +2945,22 @@ export default function MasterEvidenceWorkspace() {
 
   const buildExportPayload = async (items = stagedQueue) => {
     const selectedItemIds = new Set(items.map((item) => item.id));
+    const selectedLegalSignalHits = legalSignalHits.filter((hit) => selectedItemIds.has(hit.sourceItemId));
+    const selectedEvidenceMapping = courtEvidenceMapping.filter((item) =>
+      selectedLegalSignalHits.some((hit) => hit.id === item.id));
     return {
     caseNumber,
     generatedAt: new Date().toISOString(),
     exportPasswordSet: Boolean(exportPassword.trim()),
     coverData: coverSheetData,
     evidenceState,
+    legalSignalAudit: {
+      dictionary: legalSignalMetadata,
+      legalDecision: false,
+      reviewStatus: "human_review_required",
+      hits: selectedLegalSignalHits,
+      evidenceReferenceMapping: selectedEvidenceMapping,
+    },
     slipRecords: ledgerRecords.filter((record) => selectedItemIds.has(record.sourceItemId)).map((record) => ({
       source_file: record.source,
       source_sha256: record.sha256,
@@ -4348,6 +4372,10 @@ export default function MasterEvidenceWorkspace() {
                               <div className="mt-2 border-t border-cyan-300/20 pt-2">
                                 <div className="font-semibold text-cyan-200">Trace OCR · {record.ocrDiagnosticTrace.sourceDimensions.width}×{record.ocrDiagnosticTrace.sourceDimensions.height}</div>
                                 <div>QR {record.ocrDiagnosticTrace.qrBounds.length} · วัตถุ {record.ocrDiagnosticTrace.objectBounds.length} · OCR attempts {record.ocrDiagnosticTrace.attempts.length} · parsed regions {record.ocrDiagnosticTrace.regions.length}</div>
+                                <div data-testid="searchable-text-overlay" className="text-emerald-200">Searchable text overlay · {record.ocrTextBoxes?.length || 0} boxes · พิกัดอ้างอิงจากต้นฉบับ</div>
+                                {record.ocrDiagnosticTrace.imageArtifacts?.length ? (
+                                  <div data-testid="enhancement-artifacts" className="text-fuchsia-200">Enhancement artifacts · {record.ocrDiagnosticTrace.imageArtifacts.length} ภาพ · derived-only</div>
+                                ) : null}
                                 {record.ocrDiagnosticTrace.attempts.map((attempt) => (
                                   <div key={`${record.id}-${attempt.id}`} className="mt-1 border-l border-cyan-300/30 pl-2">
                                     {attempt.scope}/{attempt.trigger} · confidence {Math.round(attempt.meanConfidence)}% · {attempt.lines.length} lines

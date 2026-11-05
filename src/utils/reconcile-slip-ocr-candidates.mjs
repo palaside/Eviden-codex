@@ -4,9 +4,39 @@ export function reconcilePageOcrNamesIntoQrCandidates(qrCandidates, pageCandidat
     if (matches.length !== 1) return qrCandidate;
 
     const pageCandidate = matches[0];
+    const pageBank = pageCandidate.data?.bank?.name;
+    const pageSenderBank = pageCandidate.data?.sender?.bank;
+    const qrBank = qrCandidate.data?.bank?.name;
+    const unknownBank = (value) => !value || String(value).includes("ธนาคารไม่ระบุ");
+    const evidencedBank = pageSenderBank || (pageBank && !unknownBank(pageBank) ? pageBank : null);
+    const bankEvidence = unknownBank(qrBank) && evidencedBank ? {
+      bank: {
+        ...(qrCandidate.data.bank ?? {}),
+        name: evidencedBank,
+        confidence: pageCandidate.data?.bank?.confidence ?? 0,
+      },
+      sender: {
+        ...(qrCandidate.data.sender ?? {}),
+        bank: pageSenderBank || qrCandidate.data?.sender?.bank || null,
+      },
+    } : null;
     const pageName = pageCandidate.data?.receiver?.name?.trim();
     const qrName = qrCandidate.data?.receiver?.name?.trim();
-    if (!pageName || !qrName || normalizeName(pageName) === normalizeName(qrName)) return qrCandidate;
+    if (!pageName || !qrName || normalizeName(pageName) === normalizeName(qrName)) {
+      if (!bankEvidence) return qrCandidate;
+      return {
+        ...qrCandidate,
+        data: {
+          ...qrCandidate.data,
+          ...bankEvidence,
+          raw_text: [...new Set([...(qrCandidate.data.raw_text ?? []), ...(pageCandidate.data?.raw_text ?? [])])],
+          warnings: [...new Set([
+            ...(qrCandidate.data.warnings ?? []),
+            "ชื่อ/ธนาคารจาก OCR เต็มหน้าถูกผูกกับสลิปเดียวกันด้วยกรอบและข้อมูลรายการ; ต้องตรวจจากภาพต้นฉบับ",
+          ])],
+        },
+      };
+    }
 
     const cropConfidence = qrCandidate.data.confidence?.receiver_name ?? 0;
     const pageConfidence = pageCandidate.data.confidence?.receiver_name ?? 0;
@@ -16,6 +46,7 @@ export function reconcilePageOcrNamesIntoQrCandidates(qrCandidates, pageCandidat
       ...qrCandidate,
       data: {
         ...qrCandidate.data,
+        ...(bankEvidence ?? {}),
         receiver: { ...qrCandidate.data.receiver, name: usePageName ? pageName : qrName },
         confidence: {
           ...qrCandidate.data.confidence,
@@ -58,7 +89,17 @@ function isSameSlipEvidence(left, right) {
     && normalizeIdentifier(leftData.transaction.reference_no) === normalizeIdentifier(rightData.transaction.reference_no);
   const sameReceiverAccount = leftData.receiver?.account_no && rightData.receiver?.account_no
     && normalizeIdentifier(leftData.receiver.account_no) === normalizeIdentifier(rightData.receiver.account_no);
-  return Boolean(sameReference || sameReceiverAccount);
+  if (sameReference || sameReceiverAccount) return true;
+
+  // A full-page OCR region may not parse a reference/account even though it
+  // covers the exact QR candidate. Permit the spatial join only when the
+  // amount agrees and at least one side lacks the identifier; ambiguous
+  // multiple matches are still rejected by the caller.
+  const missingIdentifier = !leftData.transaction?.reference_no
+    || !rightData.transaction?.reference_no
+    || !leftData.receiver?.account_no
+    || !rightData.receiver?.account_no;
+  return missingIdentifier && overlap >= 0.8;
 }
 
 function intersectionOverSmallerArea(left, right) {

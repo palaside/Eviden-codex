@@ -980,8 +980,24 @@ export function findSlipOcrRegions(
       ?? fallbackReceiverAccountLine
       ?? receiverAccountFallback;
     const senderBankLine = senderBlockMatch?.bankLine
+      ?? senderFallback?.bankLine
       ?? (senderNameLine ? senderLines.slice(senderNameLineIndex + 1).find((line) => parseBank(line.text)) : null);
     const receiverBankLine = recipientLines.find((line) => parseBank(line.text));
+    // In a QR crop the transaction window is centered on the amount and can
+    // exclude the issuer bank line above the party block. If the sender bank
+    // is directly evidenced by OCR, use it as the structured slip bank; do
+    // not infer it from the receiver bank or from a QR payload.
+    const evidencedSenderBank = senderBankLine ? parseBank(senderBankLine.text) : null;
+    if (evidencedSenderBank) {
+      // The sender bank is the issuer shown in the slip's "from" block. It is
+      // stronger evidence for the structured slip bank than a receiver-bank
+      // line or an incidental OCR line elsewhere in the crop.
+      bankName = evidencedSenderBank;
+      // senderFallback is discovered from the same prepared OCR line set as
+      // `nearby`; its narrow helper return type omits the derived normalized
+      // property, so preserve the prepared-line type at this boundary.
+      bankLine = senderBankLine as typeof bankLine;
+    }
     if (bankLine && receiverBankLine === bankLine && senderBankLine
       && parseBank(senderBankLine.text) !== bankName) {
       bankName = null;

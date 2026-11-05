@@ -1,5 +1,6 @@
 import { removeThaiTitlePrefix } from "./recipient-name-normalization.mjs";
 import type { SlipOcrDiagnosticTrace, SlipOcrTraceBounds } from "../types/slip-ocr-trace";
+import type { EmbeddedSlipRecord } from "../types/embedded-slip";
 
 export interface DetectedSlipRecipientRecord {
   id: string;
@@ -13,6 +14,7 @@ export interface DetectedSlipRecipientRecord {
   bounds?: { x: number; y: number; width: number; height: number };
   ocrTextBoxes?: Array<{
     text: string;
+    rawOcr?: string | null;
     confidence: number;
     bounds: { x: number; y: number; width: number; height: number };
     classification?: "slip_evidence" | "chat_context" | "uncertain";
@@ -20,7 +22,11 @@ export interface DetectedSlipRecipientRecord {
     supportsFields?: string[];
   }>;
   ocrDiagnosticTrace?: SlipOcrDiagnosticTrace;
+  bank?: { name?: string | null; confidence?: number | null };
+  bankEvidence?: EmbeddedSlipRecord["bankEvidence"];
+  fieldCrops?: EmbeddedSlipRecord["fieldCrops"];
   data: {
+    bank?: { name?: string | null; confidence?: number | null };
     receiver?: { name?: string | null; account_no?: string | null; bank?: string | null };
     confidence?: { receiver_name?: number | null };
     reviewed_fields?: string[];

@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { combineQrAndOcrSlipCandidates } from "../supplement-qr-candidates.ts";
 
-const candidate = ({ x, y, width, height, amount = null, fee = null, referenceNo = null, bankName = null, senderName = null, senderAccount = null, receiverName = null, receiverNameConfidence = 0, date = null, time = null, warning = "candidate" }) => ({
+const candidate = ({ x, y, width, height, amount = null, fee = null, referenceNo = null, bankName = null, senderName = null, senderAccount = null, senderBank = null, receiverName = null, receiverNameConfidence = 0, date = null, time = null, warning = "candidate" }) => ({
   data: {
     bank: { name: bankName, confidence: bankName ? 0.9 : 0 },
     transaction: { amount, fee, reference_no: referenceNo, date, time },
-    sender: { name: senderName, account_no: senderAccount, bank: null },
+    sender: { name: senderName, account_no: senderAccount, bank: senderBank },
     receiver: { name: receiverName },
-    confidence: { amount: amount ? 0.9 : 0, reference_no: referenceNo ? 0.9 : 0, sender_name: senderName ? 0.91 : 0, sender_account: senderAccount ? 0.9 : 0, receiver_name: receiverNameConfidence, receiver_account: 0, date: date ? 0.9 : 0, time: time ? 0.9 : 0 },
+    confidence: { amount: amount ? 0.9 : 0, reference_no: referenceNo ? 0.9 : 0, sender_name: senderName ? 0.91 : 0, sender_account: senderAccount ? 0.9 : 0, sender_bank: senderBank ? 0.95 : 0, receiver_name: receiverNameConfidence, receiver_account: 0, date: date ? 0.9 : 0, time: time ? 0.9 : 0 },
     raw_text: [warning],
     warnings: [warning],
   },
@@ -109,6 +109,22 @@ test("supplements only missing QR fields from the OCR region containing its QR",
   assert.equal(combined.data.confidence.receiver_name, 0.88);
   assert.deepEqual(combined.data.raw_text, ["qr", "ocr"]);
   assert.equal(combined.isConfirmed, undefined);
+});
+
+test("uses evidenced sender bank when OCR structured bank is empty", () => {
+  const qr = candidate({ x: 40, y: 50, width: 20, height: 20, amount: 15000, warning: "qr" });
+  const ocr = candidate({
+    x: 10, y: 10, width: 100, height: 120, amount: 15000,
+    senderBank: "ธนาคารกรุงไทย", receiverName: "น.ส. ผู้รับ", receiverNameConfidence: 0.9,
+    warning: "ocr",
+  });
+  ocr.data.raw_text = ["จำนวนเงิน 15,000.00 บาท", "กรุงไทย"];
+
+  const [combined] = combineQrAndOcrSlipCandidates([qr], [ocr]);
+
+  assert.equal(combined.data.bank.name, "ธนาคารกรุงไทย");
+  assert.equal(combined.data.bank.confidence, 0.95);
+  assert.equal(combined.data.sender.bank, "ธนาคารกรุงไทย");
 });
 
 test("merges sender name and party accounts from position-matched OCR without overriding QR data", () => {

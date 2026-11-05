@@ -57,7 +57,7 @@ try {
   await page.getByRole("button", { name: /ตารางสรุปหลักฐาน/ }).click();
   const afterReloadValue = await page.getByLabel("ชื่อผู้รับรายการ 1").inputValue();
   step("persisted-value-observed", { afterReloadValue });
-  assert.match(after, /ผู้ใช้แก้\/กรอกชื่อและยืนยันแล้ว/u);
+  assert.match(after, /ผู้ใช้แก้ชื่อและยืนยันแล้ว · ผล OCR เดิมยังขัดแย้ง/u);
   assert.equal(afterReloadValue, correctedRecipient);
   assert.doesNotMatch(after, /กรอก\/แก้ไขแล้ว · รอตรวจ/u);
   step("reload-preserves-confirmation-and-correction", { ok: true, confirmationVisible: true, correctedValueVisible: true });

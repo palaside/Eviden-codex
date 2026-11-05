@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://digital-evidence.local/schemas/thclaws-evidence-audit.schema.json",
+  "title": "Digital Evidence thClaws Evidence Audit",
+  "type": "object",
+  "required": ["schemaVersion", "auditId", "readOnly", "scope", "checks", "traceInventory"],
+  "properties": {
+    "schemaVersion": { "type": "string" },
+    "auditId": { "type": "string" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "readOnly": { "const": true },
+    "scope": {
+      "type": "object",
+      "required": ["root", "input", "sourceFiles", "traceFiles"],
+      "properties": {
+        "root": { "type": "string" },
+        "input": { "type": "string" },
+        "sourceFiles": { "type": "array", "items": { "type": "string" } },
+        "traceFiles": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "evidence", "notes"],
+        "properties": {
+          "id": { "type": "string" },
+          "status": { "enum": ["observed", "not_observed", "blocked", "unknown"] },
+          "evidence": { "type": "array", "items": { "type": "string" } },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+    "traceInventory": {
+      "type": "object",
+      "required": ["jsonFiles", "parseable", "unreadable"],
+      "properties": {
+        "jsonFiles": { "type": "integer", "minimum": 0 },
+        "parseable": { "type": "integer", "minimum": 0 },
+        "unreadable": { "type": "integer", "minimum": 0 },
+        "statusCounts": { "type": "object", "additionalProperties": { "type": "integer" } },
+        "sampleFiles": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "e2e": { "type": "object" },
+    "mcp": { "type": "object" }
+  }
+}

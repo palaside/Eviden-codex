@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as nodeExecFile } from "node:child_process";
 import { promisify } from "node:util";
+import { resolveDerivedImagePython } from "./derived-python-runtime.mjs";
 
 const execFile = promisify(nodeExecFile);
 const ALLOWED_SCALES = new Set([2, 4]);
@@ -41,6 +42,55 @@ function dimensions(buffer) {
   return null;
 }
 
+async function createCpuFallback({
+  sourcePath,
+  outputPath,
+  sourceBuffer,
+  sourceSha256,
+  sourceDimensions,
+  scale,
+  model,
+  env,
+  cwd,
+  fallbackScriptPath,
+  fallbackExecFileImpl,
+  exists,
+  fallbackReason,
+  timeoutMs,
+}) {
+  if (!(await exists(fallbackScriptPath))) return null;
+  const fallbackDir = await fs.mkdtemp(path.join(path.dirname(outputPath), ".forensic-derived-"));
+  try {
+    const fallbackPython = resolveDerivedImagePython({ env, cwd });
+    await fallbackExecFileImpl(fallbackPython, [
+      fallbackScriptPath,
+      "--image", sourcePath,
+      "--output-dir", fallbackDir,
+      "--source-dpi", "150",
+      "--target-dpi", String(150 * scale),
+    ], { timeout: Math.max(timeoutMs, 120_000), windowsHide: true });
+    const fallbackOutput = path.join(fallbackDir, "11_target_300dpi_color.png");
+    const derivedBuffer = await fs.readFile(fallbackOutput);
+    await fs.copyFile(fallbackOutput, outputPath);
+    return {
+      status: "success",
+      sourceSha256,
+      derivedSha256: crypto.createHash("sha256").update(derivedBuffer).digest("hex"),
+      engine: "opencv-forensic-fallback",
+      model,
+      scale,
+      sourceDimensions,
+      derivedDimensions: dimensions(derivedBuffer),
+      outputPath,
+      error: null,
+      fallbackReason,
+      reviewOnly: true,
+    };
+  } finally {
+    await fs.rm(fallbackDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 export async function createUpscaledDerivedImage({
   sourcePath,
   outputPath,
@@ -50,6 +100,10 @@ export async function createUpscaledDerivedImage({
   modelDir = null,
   env = process.env,
   execFileImpl = execFile,
+  fallbackExecFileImpl = execFile,
+  fallbackScriptPath = path.resolve(process.cwd(), "scripts", "forensic_image_enhancement.py"),
+  exists = async (candidate) => { try { await fs.access(candidate); return true; } catch { return false; } },
+  cwd = process.cwd(),
   timeoutMs = 600_000,
 }) {
   if (!sourcePath || !outputPath) throw new TypeError("sourcePath and outputPath are required");
@@ -66,10 +120,51 @@ export async function createUpscaledDerivedImage({
     ? path.resolve(path.dirname(executable), "..", "models")
     : "models");
   const args = buildUpscaylCommand({ executable, inputPath: sourcePath, outputPath: temporaryOutput, scale, model, modelDir: resolvedModelDir }).slice(1);
+  const sourceDimensions = dimensions(sourceBuffer);
+  const maxUpscaylPixels = Number(env.UPSCAYL_MAX_PIXELS || 4_000_000);
+  const largeSource = sourceDimensions && sourceDimensions.width * sourceDimensions.height > maxUpscaylPixels;
+  const preferCpuFallback = env.UPSCAYL_PREFER_CPU_FALLBACK === "true" || (largeSource && env.UPSCAYL_SKIP_LARGE_IMAGES !== "false");
+  if (preferCpuFallback && env.UPSCAYL_ENABLE_CPU_FALLBACK !== "false") {
+    try {
+      const fallback = await createCpuFallback({
+        sourcePath, outputPath: temporaryOutput, sourceBuffer, sourceSha256: actualSourceSha256,
+        sourceDimensions, scale, model, env, cwd, fallbackScriptPath, fallbackExecFileImpl,
+        exists, fallbackReason: largeSource ? "large_source_cpu_fallback" : "upscayl_preferred_cpu_fallback", timeoutMs,
+      });
+      if (fallback) return fallback;
+    } catch {
+      // Continue to the configured Upscayl attempt when the CPU fallback is unavailable.
+    }
+  }
   try {
     await execFileImpl(executable, args, { timeout: timeoutMs, windowsHide: true });
   } catch (error) {
     const code = error?.code === "ENOENT" ? "unavailable" : "failed";
+    const upscaylError = error instanceof Error ? error.message : String(error);
+    if (env.UPSCAYL_ENABLE_CPU_FALLBACK !== "false") {
+      try {
+        const fallback = await createCpuFallback({
+          sourcePath, outputPath: temporaryOutput, sourceBuffer, sourceSha256: actualSourceSha256,
+          sourceDimensions, scale, model, env, cwd, fallbackScriptPath, fallbackExecFileImpl,
+          exists, fallbackReason: code === "unavailable" ? "upscayl_unavailable" : "upscayl_failed_or_timed_out", timeoutMs,
+        });
+        if (fallback) return { ...fallback, error: upscaylError };
+      } catch (fallbackError) {
+        return {
+          status: code,
+          sourceSha256: actualSourceSha256,
+          derivedSha256: null,
+          engine: "upscayl-ncnn",
+          model,
+          scale,
+          sourceDimensions,
+          derivedDimensions: null,
+          outputPath: null,
+          error: `${upscaylError}; CPU fallback failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+          reviewOnly: true,
+        };
+      }
+    }
     return {
       status: code,
       sourceSha256: actualSourceSha256,
@@ -80,7 +175,7 @@ export async function createUpscaledDerivedImage({
       sourceDimensions: dimensions(sourceBuffer),
       derivedDimensions: null,
       outputPath: null,
-      error: error instanceof Error ? error.message : String(error),
+      error: upscaylError,
       reviewOnly: true,
     };
   }

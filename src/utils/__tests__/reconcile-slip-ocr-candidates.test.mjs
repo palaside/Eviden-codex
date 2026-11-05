@@ -69,3 +69,20 @@ test("keeps crop OCR when more than one page region could match the slip", () =>
 
   assert.equal(result.data.receiver.name, "OCR crop name");
 });
+
+test("carries evidenced sender bank from the matching full-page OCR candidate", () => {
+  const qrCrop = candidate({ name: "น.ส. ผู้รับ", bounds: { x: 20, y: 20, width: 100, height: 120 } });
+  qrCrop.data.bank = { name: "ธนาคารไม่ระบุ", confidence: 0 };
+  qrCrop.data.sender = { name: null, bank: null, account_no: "XXX-X-XX764-0" };
+
+  const pageOcr = candidate({ name: "น.ส. ผู้รับ", bounds: { x: 20, y: 20, width: 100, height: 120 } });
+  pageOcr.data.bank = { name: "ธนาคารกรุงไทย", confidence: 0.95 };
+  pageOcr.data.sender = { name: null, bank: "ธนาคารกรุงไทย", account_no: "XXX-X-XX764-0" };
+
+  const [result] = reconcilePageOcrNamesIntoQrCandidates([qrCrop], [pageOcr]);
+
+  assert.equal(result.data.bank.name, "ธนาคารกรุงไทย");
+  assert.equal(result.data.bank.confidence, 0.95);
+  assert.equal(result.data.sender.bank, "ธนาคารกรุงไทย");
+  assert.ok(result.data.warnings.some((warning) => warning.includes("ธนาคาร")));
+});

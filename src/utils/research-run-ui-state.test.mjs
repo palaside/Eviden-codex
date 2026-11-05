@@ -22,6 +22,13 @@ test("explicit original selection retains original URL and source SHA", () => {
   assert.equal(source.sourceSha256, sha);
   assert.equal(item.reviewPreviewUrl, "data:image/png;base64,Aw==");
 });
+test("successful processing selects the durable legacy derived preview until a research artifact is chosen", () => {
+  const item = { ...fixture(), selectedReviewArtifactId: "" };
+  const source = review.resolveReviewCanvasSource(item);
+  assert.equal(source.url, item.reviewPreviewUrl);
+  assert.equal(source.sourceKind, "derived");
+  assert.equal(source.variant, "Upscayl");
+});
 test("Stream A selection resolves artifact without modifying original", () => {
   const item = { ...fixture(), selectedReviewArtifactId: "derived/stream-a/sharpen.png" };
   const source = review.resolveReviewCanvasSource(item);

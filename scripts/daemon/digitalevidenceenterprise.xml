@@ -25,6 +25,7 @@
 	<env name="PORT" value="3450"/>
 	<env name="NEXT_DIST_DIR" value="build-output-enterprise"/>
 	<env name="NODE_ENV" value="production"/>
+	<env name="PYTHON_EXECUTABLE" value="D:\Project\Digital Evi - Codex\scripts\.venv-evidence-export\Scripts\python.exe"/>
 	<serviceaccount>
 		<domain>DESKTOP-LPENMN2</domain>
 		<user>LocalSystem</user>

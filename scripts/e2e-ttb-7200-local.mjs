@@ -9,7 +9,11 @@ const outDir = path.resolve(process.env.E2E_OUT_DIR || path.join(root, "For Test
 const expectedAmount = process.env.E2E_EXPECT_AMOUNT ? Number(process.env.E2E_EXPECT_AMOUNT) : null;
 await fs.mkdir(outDir, { recursive: true });
 
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({
+  headless: process.env.E2E_HEADLESS !== "false",
+  executablePath: process.env.E2E_BROWSER_EXECUTABLE || undefined,
+  args: ["--no-sandbox", "--proxy-server=direct://", "--proxy-bypass-list=*"]
+});
 const page = await browser.newPage({ viewport: { width: 1662, height: 1548 } });
 const report = { baseUrl, fixture, steps: [], apiResponses: [], consoleErrors: [], pageErrors: [] };
 page.on("console", (message) => { if (message.type() === "error") report.consoleErrors.push(message.text()); });

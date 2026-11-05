@@ -243,7 +243,7 @@ test("keeps a masked sender OCR line from a uniquely structured two-party slip",
   assert.equal(candidate.senderNameConfidence, 0.86);
   assert.equal(candidate.senderBankName, "ธนาคารกรุงไทย");
   assert.equal(candidate.senderAccount, "XXX-X-XX526-6");
-  assert.equal(candidate.bankName, null);
+  assert.equal(candidate.bankName, "ธนาคารกรุงไทย");
   assert.equal(candidate.receiverBankName, "ธนาคารทหารไทยธนชาต");
   assert.equal(toSlipExtraction(candidate).warnings.some((warning) => warning.includes("ชื่อผู้โอน")), false);
 });
@@ -591,6 +591,24 @@ test("extracts a QR-anchored slip with standalone amount and Thai date/time", ()
   assert.equal(candidate.date, "2025-08-16");
   assert.equal(candidate.time, "19:18");
   assert.equal(candidate.receiverName, "น.ส. จิณห์นิภา ประสาทเขตรการ");
+});
+
+test("uses evidenced sender bank as the structured bank when QR crop bank line is outside amount window", () => {
+  const [candidate] = findSlipOcrRegions([
+    line("โอนเงินสำเร็จ", 100, 94),
+    line("10,000.00", 300, 91),
+    line("นาย ณัฐชัย รักษาวงษ์", 1150, 94),
+    line("กรุงไทย", 1240, 95),
+    line("XXX-X-XX558-9", 1300, 89),
+    line("น.ส. จิณห์นิภา ประสาทเขตรการ", 1450, 93),
+    line("ทีเอ็มบีธนชาต", 1540, 94),
+    line("XXX-X-XX996-5", 1600, 89),
+    line("รหัสอ้างอิง: 202508161903564508", 1750, 93),
+  ], { width: 2480, height: 3507 }, { qrAnchor: { x: 1800, y: 100 } });
+
+  assert.equal(candidate.senderBankName, "ธนาคารกรุงไทย");
+  assert.equal(candidate.bankName, "ธนาคารกรุงไทย");
+  assert.equal(toSlipExtraction(candidate).bank.name, "ธนาคารกรุงไทย");
 });
 
 test("separates slip evidence lines from surrounding chat OCR and retains line provenance", () => {
