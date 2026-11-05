@@ -1,11 +1,19 @@
 import { chromium } from "@playwright/test";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import { auditTraceCandidates } from "./e2e-field-audit.mjs";
+import { writeAtomicJson } from "./batch500-contract.mjs";
 
 const root = process.cwd();
 const baseUrl = process.env.E2E_BASE_URL || "http://127.0.0.1:3450/";
-const outDir = path.resolve(root, process.env.E2E_OUT_DIR || path.join("For Test Results", "batch-local-e2e"));
+const outDir = path.resolve(root, process.env.E2E_OUT_DIR || path.join("For Test Results", `batch-local-e2e-${randomUUID()}`));
+const buildDir = path.resolve(root, process.env.E2E_BUILD_DIR || process.env.NEXT_DIST_DIR || "build-output-enterprise");
+const buildId = process.env.E2E_BUILD_ID || await fs.readFile(path.join(buildDir, "BUILD_ID"), "utf8").then((value) => value.trim()).catch((error) => {
+  if (error.code === "ENOENT") return null;
+  throw error;
+});
+const processingVersion = process.env.E2E_PROCESSING_VERSION || "batch-local-e2e.v1";
 const limit = Number(process.env.E2E_BATCH_LIMIT || 20);
 const requestedRoots = (process.env.E2E_FIXTURE_ROOTS || "For Test\\แชทที่ 1;For Test\\แชทที่ 2;For Test\\แชทที่ 3;For Test\\Done").split(";").filter(Boolean);
 const offset = Math.max(0, Number(process.env.E2E_BATCH_OFFSET || 0));
@@ -21,7 +29,9 @@ for (const relativeRoot of requestedRoots) {
 }
 const explicitFixtures = (process.env.E2E_FIXTURE_FILES || "").split(";").map((file) => file.trim()).filter(Boolean).map((file) => path.resolve(root, file));
 const fixtures = explicitFixtures.length > 0 ? explicitFixtures : allFiles.slice(offset, offset + limit);
-await fs.mkdir(outDir, { recursive: true });
+await fs.mkdir(path.dirname(outDir), { recursive: true });
+// A prior run directory may contain evidence: fail rather than replace it.
+await fs.mkdir(outDir);
 
 const browser = await chromium.launch({
   headless: true,
@@ -29,12 +39,12 @@ const browser = await chromium.launch({
 });
 const results = [];
 const writePartialReport = async () => {
-  await fs.writeFile(path.join(outDir, "partial-report.json"), JSON.stringify({ schema: "digital-evidence.e2e-batch-local.partial.v1", baseUrl, requestedLimit: limit, processed: results.length, results }, null, 2), "utf8");
+  await writeAtomicJson(path.join(outDir, "partial-report.json"), { schema: "digital-evidence.e2e-batch-local.partial.v1", baseUrl, requestedLimit: limit, processed: results.length, results });
 };
 for (const [index, fixture] of fixtures.entries()) {
   const page = await browser.newPage({ viewport: { width: 1662, height: 1548 } });
   page.setDefaultTimeout(30_000);
-  const result = { index: index + 1, fixture, steps: [], apiResponses: [], consoleErrors: [], pageErrors: [] };
+  const result = { index: index + 1, fixture, fixturePath: fixture, sourceSha256: null, buildId, processingVersion, status: "not_run", tracePath: null, startedAt: new Date().toISOString(), completedAt: null, steps: [], apiResponses: [], consoleErrors: [], pageErrors: [] };
   page.on("console", (message) => { if (message.type() === "error") result.consoleErrors.push(message.text()); });
   page.on("pageerror", (error) => result.pageErrors.push(error.stack || error.message));
   page.on("response", (response) => {
@@ -47,6 +57,7 @@ for (const [index, fixture] of fixtures.entries()) {
     }
   });
   try {
+    result.sourceSha256 = createHash("sha256").update(await fs.readFile(fixture)).digest("hex");
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await page.route(/\/api\/(?:slips\/extract|slips\/slipvision|legal\/tlex)/u, async (route) => {
       result.externalProviderCall = route.request().url();
@@ -69,6 +80,7 @@ for (const [index, fixture] of fixtures.entries()) {
     const traceDownload = await traceDownloadPromise;
     const tracePath = path.join(outDir, `${String(index + 1).padStart(3, "0")}-trace.json`);
     await traceDownload.saveAs(tracePath);
+    result.tracePath = tracePath;
     const trace = JSON.parse(await fs.readFile(tracePath, "utf8"));
     // Inspect the same evidence table a reviewer uses; canvas visibility
     // alone is not enough to prove field trace/overlay propagation to UI.
@@ -106,13 +118,19 @@ for (const [index, fixture] of fixtures.entries()) {
       pageErrors: result.pageErrors.length,
       fieldAudit,
     };
+    result.status = traceCandidates.length === 0 || traceCandidates.some((candidate) => candidate.needsReview === true || candidate.isConfirmed !== true)
+      ? "review_required" : "completed";
     if (candidateCount > 0 || result.consoleErrors.length || result.pageErrors.length) {
       await page.screenshot({ path: path.join(outDir, `${String(index + 1).padStart(3, "0")}-${path.parse(fixture).name.replace(/[^a-zA-Z0-9_-]+/g, "_")}.png`), fullPage: true });
     }
   } catch (error) {
+    result.status = "failed";
     result.error = error instanceof Error ? error.stack || error.message : String(error);
     await page.screenshot({ path: path.join(outDir, `${String(index + 1).padStart(3, "0")}-error.png`), fullPage: true }).catch(() => {});
   } finally {
+    if (result.externalProviderCall || result.pageErrors.length || result.assertions?.fieldAudit?.passed !== true
+      || (requireReviewDerivedPreview && result.assertions?.reviewDerivedPreviewVisible === false)) result.status = "failed";
+    result.completedAt = new Date().toISOString();
     results.push(result);
     await writePartialReport();
     await page.close();
@@ -146,7 +164,7 @@ const report = {
   fieldAuditPassed: results.filter((item) => item.assertions?.fieldAudit?.passed === true).length,
   results,
 };
-await fs.writeFile(path.join(outDir, "report.json"), JSON.stringify(report, null, 2), "utf8");
+await writeAtomicJson(path.join(outDir, "report.json"), report);
 console.log(JSON.stringify({ outDir, processed: report.processed, failed: report.failed, candidatesDetected: report.candidatesDetected, traceCandidates: report.traceCandidates, amountPresent: report.amountPresent, referencePresent: report.referencePresent, senderNamePresent: report.senderNamePresent, receiverNamePresent: report.receiverNamePresent, needsReview: report.needsReview, sourceSha256Present: report.sourceSha256Present, sourcePagePresent: report.sourcePagePresent, externalProviderCalls: report.externalProviderCalls, consoleErrorCases: report.consoleErrorCases, pageErrorCases: report.pageErrorCases }, null, 2));
 if (report.failed > 0 || report.externalProviderCalls > 0 || report.pageErrorCases > 0
   || report.results.some((item) => item.assertions?.fieldAudit?.passed !== true)
