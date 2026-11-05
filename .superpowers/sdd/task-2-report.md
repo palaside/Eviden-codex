@@ -69,3 +69,42 @@ Remaining gaps / limits:
 - Concurrent orchestration processes against one run directory are not supported or tested; use one wrapper at a time.
 - The committed git identity differs from the pre-commit pilot manifest. Resuming that pilot after this commit must fail the git identity guard; start a fresh run for post-commit validation rather than editing its old manifest.
 - No files were deliberately deleted, no original fixtures were changed, and previous evidence directories were preserved. Test fixtures/logs and pilot artifacts are untracked local evidence and are not included in the Task 2 commit.
+
+## CURRENT TASK 2 REVIEW FIX — P1/P2 occurrence accounting (2026-11-05)
+
+Scope: reviewer findings against `cffb926df0e8cb23c18466f2a06b37f17ba94633`, in the same repository and branch `codex/task-1-contract`. This section supersedes the original implementation's claims about complete duplicate accounting. Earlier pilot results remain historical evidence, not validation of this fix.
+
+### Findings confirmed and changes
+
+- P1 confirmed: accountDuplicates returned immediately whenever a fixturePath already had a checkpoint row. A not_run/failed duplicate therefore survived unchanged after another occurrence of its SHA completed, while getPendingFixtures considered the SHA complete.
+- P2 confirmed: failure handling traversed SHA-deduplicated pending work. If the runner failed before producing a result, a second source occurrence could be absent from the saved checkpoint.
+- Replaced that accounting loop with per-occurrence reconciliation, run before selecting SHA-deduplicated work and again after each result and on failure. Every selected inventory path receives a checkpoint row before the browser runner starts. Results replace the matching path in place.
+- A duplicate without completion proof stays not_run (or retains its failed status) and points via duplicateOf to its selected representative. This link expresses equal source SHA only; it does not claim processing success, a usable trace, or confirmed evidence.
+- Once a representative has processing-complete evidence and a parseable SHA-matching trace, existing not_run/failed duplicate rows become skipped_duplicate with duplicateOf, tracePath, build/processing identity and independent reviewStatus. Completion and review_required remain separate. Stale skipped_duplicate rows whose completion proof is unavailable return to not_run rather than remaining successful skips.
+- Independent review_required is preserved from either occurrence's reviewStatus or status, including a representative whose processing status is completed while reviewStatus still requires review.
+- Provider/quota detection, persisted stopReason and the no-automatic-resume guard were not changed. The existing provider/quota stop regression still passes.
+
+Only `scripts/run-batch500-resumable.mjs`, `scripts/tests/run-batch500-resumable.test.mjs`, and this report changed in this fix. No further Task 1 change, wrapper behavior change, dependency, provider or Xerox skill work was required.
+
+### Regression proof
+
+New tests use retained synthetic fixture files, real manifest/checkpoint serialization and actual trace JSON files with an injected runner. They exercise runBatch input -> result callback/failure -> atomic on-disk checkpoint -> resume decision, rather than only an internal helper.
+
+1. Two pre-existing not_run occurrences sharing one SHA: exactly one image is handed to the runner; at the per-image acknowledgement boundary, both paths are saved, the representative is completed/review_required, and the other is skipped_duplicate with matching duplicateOf/tracePath and reviewStatus=review_required. Batch completes; an intentional second runBatch call makes no runner call.
+2. The same scenario with two pre-existing failed occurrences checks identical reconciliation and resume behavior.
+3. Runner throws before its first result: the failure checkpoint contains both inventory paths, both remain not_run, the second explicitly links to the first with duplicateOf, and no successful trace or skipped completion is invented.
+4. A representative with status=completed and independent reviewStatus=review_required propagates review_required to its duplicate.
+
+RED: after correcting the new fixture helper to use the recomputed manifest identity, the first three regressions failed with not_run/failed instead of skipped_duplicate, and one occurrence instead of two. The independent reviewStatus regression separately failed with completed instead of review_required before its correction.
+
+Final checks:
+
+- `node --test scripts/tests/run-batch500-resumable.test.mjs`: **13 passed, 0 failed**.
+- `node --test scripts/tests/batch500-contract.test.mjs`: **13 passed, 0 failed**. TEMP/TMP pointed to the workspace's retained test-evidence directory to avoid the previously documented Windows sandbox temporary-folder rename restriction.
+- `node --check scripts/run-batch500-resumable.mjs` and `node --check scripts/tests/run-batch500-resumable.test.mjs`: passed.
+- PowerShell parser check for `scripts/run-batch500-resumable.ps1`: passed; wrapper unchanged.
+- `git diff --check`: passed before staging; staged whitespace and file-scope checks are part of the fix commit preparation.
+
+### Current status and limits
+
+P1/P2 are addressed with failing-before/passing-after regression evidence at the orchestration/checkpoint level. These tests are simulations of browser result delivery; they are not a new live browser E2E result. No fresh 10-image pilot was needed to reproduce these deterministic checkpoint defects and none was run. No full 500-image batch was run. The original complete 10-image pilot and live browser resume proof remain incomplete, as reported above; this fix does not change that overall E2E limitation. Existing fixture files and old pilot evidence were not modified or deleted.

@@ -124,3 +124,77 @@ test('duplicate occurrences are accountable while the SHA is processed only once
   assert.equal(result.results.length, 2);
   assert.equal(result.results.find(r => r.status === 'skipped_duplicate').reviewStatus, 'review_required');
 });
+
+async function duplicatePair() {
+  const context = await setup(2);
+  await fs.writeFile(context.inventory[1].fixturePath, 'image-0');
+  const manifest = JSON.parse(await fs.readFile(context.manifestPath));
+  manifest.inventory[1].sourceSha256 = context.inventory[0].sourceSha256;
+  const updatedManifest = createBatchRunManifest(manifest);
+  await writeAtomicJson(context.manifestPath, updatedManifest);
+  return { ...context, manifest: updatedManifest };
+}
+
+for (const previousStatus of ['not_run', 'failed']) {
+  test(`resume accounts for both same-SHA ${previousStatus} occurrences before completing`, async () => {
+    const { manifestPath, dir, manifest } = await duplicatePair();
+    const checkpointPath = path.join(dir, 'checkpoint.json');
+    await writeAtomicJson(checkpointPath, {
+      ...manifest, schema: 'digital-evidence.batch500-checkpoint.v1', batchStates: {},
+      results: manifest.inventory.map(item => ({ ...item, batchId: '001', status: previousStatus, processingStatus: previousStatus, reviewStatus: 'review_required' })),
+    });
+    const args = { manifestPath, batchId: '001', offset: 0, limit: 2 };
+    let sent = 0;
+    await runBatch({ ...args, runner: async ({ fixtures, outDir, onResult }) => {
+      sent += fixtures.length;
+      assert.equal(fixtures.length, 1);
+      await onResult(await completed(fixtures[0], outDir));
+      // The occurrence linkage must be durable at the per-image barrier.
+      const checkpoint = JSON.parse(await fs.readFile(checkpointPath));
+      assert.equal(checkpoint.results.length, 2);
+      const original = checkpoint.results.find(r => r.fixturePath === fixtures[0].fixturePath);
+      const duplicate = checkpoint.results.find(r => r.fixturePath !== fixtures[0].fixturePath);
+      assert.equal(original.processingStatus, 'completed');
+      assert.equal(original.status, 'review_required');
+      assert.equal(duplicate.status, 'skipped_duplicate');
+      assert.equal(duplicate.processingStatus, 'skipped_duplicate');
+      assert.equal(duplicate.duplicateOf, original.fixturePath);
+      assert.equal(duplicate.tracePath, original.tracePath);
+      assert.equal(duplicate.reviewStatus, 'review_required');
+    } });
+    const checkpoint = JSON.parse(await fs.readFile(checkpointPath));
+    assert.equal(checkpoint.batchStates['001'].status, 'completed');
+    assert.deepEqual(new Set(checkpoint.results.map(r => r.fixturePath)), new Set(manifest.inventory.map(i => i.fixturePath)));
+    await runBatch({ ...args, runner: () => assert.fail('completed duplicate SHA must not be resent') });
+    assert.equal(sent, 1);
+  });
+}
+
+test('failure before first result retains both same-SHA occurrences without claiming duplicate completion', async () => {
+  const { manifestPath, dir, manifest } = await duplicatePair();
+  const checkpointPath = path.join(dir, 'checkpoint.json');
+  await assert.rejects(runBatch({ manifestPath, batchId: '001', offset: 0, limit: 2, runner: async ({ fixtures }) => {
+    assert.equal(fixtures.length, 1);
+    throw new Error('runner failed before first result');
+  } }), /runner failed before first result/);
+  const checkpoint = JSON.parse(await fs.readFile(checkpointPath));
+  assert.equal(checkpoint.batchStates['001'].status, 'failed');
+  assert.equal(checkpoint.results.length, 2);
+  assert.deepEqual(new Set(checkpoint.results.map(r => r.fixturePath)), new Set(manifest.inventory.map(i => i.fixturePath)));
+  const [original, duplicate] = manifest.inventory.map(i => checkpoint.results.find(r => r.fixturePath === i.fixturePath));
+  assert.equal(original.status, 'not_run');
+  assert.equal(original.processingStatus, 'not_run');
+  assert.equal(original.duplicateOf, undefined);
+  assert.equal(duplicate.status, 'not_run');
+  assert.equal(duplicate.processingStatus, 'not_run');
+  assert.equal(duplicate.duplicateOf, original.fixturePath);
+  assert.equal(duplicate.tracePath, undefined);
+});
+
+test('duplicate inherits independent review_required even when original status is completed', async () => {
+  const { manifestPath } = await duplicatePair();
+  const checkpoint = await runBatch({ manifestPath, batchId: '001', offset: 0, limit: 2, runner: async ({ fixtures, outDir, onResult }) => {
+    await onResult({ ...await completed(fixtures[0], outDir), status: 'completed', reviewStatus: 'review_required' });
+  } });
+  assert.equal(checkpoint.results.find(r => r.status === 'skipped_duplicate').reviewStatus, 'review_required');
+});

@@ -69,16 +69,33 @@ export async function runBatch({ manifestPath, batchId, offset, limit, runner })
   for (const item of selected) {
     if (sha(await fs.readFile(item.fixturePath)) !== item.sourceSha256) throw new Error(`Source SHA changed: ${item.fixturePath}`);
   }
-  const accountDuplicates = () => {
+  const accountOccurrences = () => {
     for (const item of selected) {
-      if (checkpoint.results.some(r => r.fixturePath === item.fixturePath)) continue;
+      const index = checkpoint.results.findIndex(r => r.fixturePath === item.fixturePath);
+      const existing = checkpoint.results[index];
+      if (existing && getPendingFixtures({ results: [existing] }, [item]).length === 0) continue;
       const original = checkpoint.results.find(r => r.sourceSha256 === item.sourceSha256 && getPendingFixtures({ results: [r] }, [item]).length === 0);
-      if (original) checkpoint.results.push({ ...item, batchId, status: 'skipped_duplicate', processingStatus: 'skipped_duplicate', duplicateOf: original.fixturePath, tracePath: original.tracePath, reviewStatus: original.status, buildId: manifest.buildId, processingVersion: manifest.processingVersion });
+      let record;
+      if (original) {
+        const reviewStatus = [existing?.reviewStatus, existing?.status, original.reviewStatus, original.status].includes('review_required') ? 'review_required' : original.status;
+        record = { ...item, batchId, status: 'skipped_duplicate', processingStatus: 'skipped_duplicate', duplicateOf: original.fixturePath, tracePath: original.tracePath, reviewStatus, buildId: manifest.buildId, processingVersion: manifest.processingVersion };
+      } else {
+        record = existing ? { ...existing } : { ...item, batchId, status: 'not_run', processingStatus: 'not_run' };
+        // A SHA relationship is not proof of processing completion. Retain
+        // pending/failed occurrences until a valid completed trace is available.
+        if (record.status === 'skipped_duplicate') record.status = record.processingStatus = 'not_run';
+        const representative = selected.find(i => i.sourceSha256 === item.sourceSha256);
+        if (representative.fixturePath !== item.fixturePath) record.duplicateOf = representative.fixturePath;
+        else delete record.duplicateOf;
+      }
+      if (index < 0) checkpoint.results.push(record);
+      else checkpoint.results[index] = record;
     }
   };
+  // Account per path before SHA-deduplicating work, including early failures.
+  accountOccurrences();
   const pending = getPendingFixtures(checkpoint, selected);
   if (!pending.length) {
-    accountDuplicates();
     checkpoint.batchStates[batchId] = { ...checkpoint.batchStates[batchId], status: 'completed', completedAt: new Date().toISOString() };
     await persist();
     return checkpoint;
@@ -97,9 +114,8 @@ export async function runBatch({ manifestPath, batchId, offset, limit, runner })
       }
       seen.add(result.sourceSha256);
       const record = { ...result, batchId, outDir };
-      checkpoint.results = checkpoint.results.filter(r => r.fixturePath !== item.fixturePath);
-      checkpoint.results.push(record);
-      accountDuplicates();
+      checkpoint.results = checkpoint.results.map(r => r.fixturePath === item.fixturePath ? record : r);
+      accountOccurrences();
       if (providerError(result)) checkpoint.stopReason = `provider/quota error: ${result.error || result.externalProviderCall || 'HTTP quota response'}`;
       await persist();
       if (checkpoint.stopReason) throw new Error(checkpoint.stopReason);
@@ -112,9 +128,7 @@ export async function runBatch({ manifestPath, batchId, offset, limit, runner })
     checkpoint.batchStates[batchId].status = 'failed';
     checkpoint.batchStates[batchId].error = error.stack || String(error);
     if (providerError({ error: String(error) })) checkpoint.stopReason ||= String(error);
-    for (const item of pending.filter(i => !seen.has(i.sourceSha256))) {
-      if (!checkpoint.results.some(r => r.fixturePath === item.fixturePath)) checkpoint.results.push({ ...item, batchId, status: 'not_run', processingStatus: 'not_run', outDir });
-    }
+    accountOccurrences();
     await persist();
     throw error;
   } finally {
