@@ -15,7 +15,7 @@ const validBounds = bounds => object(bounds) && ['x', 'y', 'width', 'height'].ev
 const needsReview = candidate => candidate?.needsReview === true || candidate?.reviewStatus === 'review_required'
   || candidate?.status === 'review_required' || candidate?.data?._fallback_meta?.needs_human_review === true
   || Object.values(candidate?.fieldQualitySummary || {}).includes('review_required')
-  || candidate?.fieldCrops?.some?.(field => field?.review_status === 'review_required' || field?.certification_status === 'review_required');
+  || (Array.isArray(candidate?.fieldCrops) && candidate.fieldCrops.some(field => field?.review_status === 'review_required' || field?.certification_status === 'review_required'));
 const traceNeedsReview = trace => Array.isArray(trace?.items) && trace.items.some(item => needsReview(item)
   || (Array.isArray(item?.candidates) && item.candidates.some(needsReview)));
 
@@ -122,10 +122,17 @@ export async function aggregateBatchReports({ runDir, expectedInventoryPath }) {
   const traceCache = new Map();
   const records = [];
   const traceIntegrity = [];
+  const inventoryOccurrences = new Set();
   for (const [inventoryIndex, item] of inventory.entries()) {
     const ranges = (manifest.batches || []).filter(b => Number.isSafeInteger(b.offset) && Number.isSafeInteger(b.limit) && inventoryIndex >= b.offset && inventoryIndex < b.offset + b.limit);
     const batchId = ranges[0]?.batchId ?? null;
-    const matching = (byPath.get(item.fixturePath) || []).filter(r => r.sourceSha256 === item.sourceSha256);
+    const occurrenceKey = JSON.stringify([item.fixturePath, item.sourceSha256]);
+    const repeatedOccurrence = inventoryOccurrences.has(occurrenceKey);
+    inventoryOccurrences.add(occurrenceKey);
+    // Path+SHA cannot disambiguate identical inventory occurrences. Reject the
+    // later occurrence rather than count the same processing attempt twice.
+    if (repeatedOccurrence) issues.push(`duplicate inventory occurrence at index ${inventoryIndex}: ${item.fixturePath}`);
+    const matching = repeatedOccurrence ? [] : (byPath.get(item.fixturePath) || []).filter(r => r.sourceSha256 === item.sourceSha256);
     const result = matching.filter(r => r.evidenceReports.includes(path.join(runDir, 'checkpoint.json'))).at(-1) || matching.at(-1);
     const missing = [];
     if (!SHA256.test(item.sourceSha256 || '')) missing.push('inventory sourceSha256');
@@ -136,6 +143,13 @@ export async function aggregateBatchReports({ runDir, expectedInventoryPath }) {
     let trace = null;
     const tracePath = result?.tracePath ? path.resolve(runDir, result.tracePath) : null;
     if (result) {
+      for (const attempt of matching) {
+        if (attempt.processingStatus !== undefined && attempt.processingStatus !== attempt.status
+          && !(attempt.processingStatus === 'completed' && attempt.status === 'review_required')) {
+          missing.push(`processingStatus/status contradiction: ${attempt.processingStatus}/${attempt.status}`);
+          status = 'failed';
+        }
+      }
       for (const key of ['buildId', 'processingVersion']) {
         if (!nonempty(result[key])) missing.push(key);
         else if (result[key] !== manifest[key]) missing.push(`${key} mismatch`);
@@ -143,6 +157,9 @@ export async function aggregateBatchReports({ runDir, expectedInventoryPath }) {
       if (result.batchId !== batchId) missing.push('batchId mismatch');
       if (status !== 'not_run') {
         for (const key of ['startedAt', 'completedAt']) {
+          // A duplicate skip did not process the source. Retain absent timing
+          // as null; provenance and the processed representative remain required.
+          if (status === 'skipped_duplicate' && result[key] == null) continue;
           if (!nonempty(result[key]) || !Number.isFinite(Date.parse(result[key]))) missing.push(key);
         }
         if (!tracePath) missing.push('tracePath');

@@ -34,6 +34,60 @@ async function fixture(count = 500) {
 }
 const aggregate = f => aggregateBatchReports({ runDir: f.runDir, expectedInventoryPath: f.expectedInventoryPath });
 
+test('500 inventory occurrences with an identical last occurrence cannot reuse 499 results', async () => {
+  const f = await fixture();
+  f.inventory[499] = { ...f.inventory[498] };
+  f.checkpoint.results.pop();
+  await fs.writeFile(f.expectedInventoryPath, JSON.stringify(f.checkpoint)); await f.save();
+  const r = await aggregate(f);
+  assert.equal(r.status, 'incomplete');
+  assert.equal(r.counts.completed, 499); assert.equal(r.counts.not_run, 1);
+  assert.equal(r.records[499].attemptCount, 0);
+  assert.ok(r.issues.some(x => x.includes('duplicate inventory occurrence')));
+});
+
+test('runner-shaped skipped_duplicate accepts absent or null processing timestamps with explicit provenance', async () => {
+  const f = await fixture();
+  f.inventory[1].sourceSha256 = f.inventory[0].sourceSha256;
+  const original = f.checkpoint.results[0];
+  f.checkpoint.results[1] = { ...f.inventory[1], batchId: '001', status: 'skipped_duplicate',
+    processingStatus: 'skipped_duplicate', duplicateOf: original.fixturePath, tracePath: original.tracePath,
+    reviewStatus: original.status, buildId: original.buildId, processingVersion: original.processingVersion };
+  await fs.writeFile(f.expectedInventoryPath, JSON.stringify(f.checkpoint));
+  for (const timing of [{}, { startedAt: null, completedAt: null }]) {
+    Object.assign(f.checkpoint.results[1], timing); await f.save();
+    const r = await aggregate(f);
+    assert.equal(r.status, 'passed'); assert.equal(r.traceIntegrity[1].valid, true);
+    assert.equal(r.records[1].startedAt, null); assert.equal(r.records[1].completedAt, null);
+    for (const name of ['aggregate-report.json', 'missing.json', 'duplicates.json', 'trace-integrity.json']) {
+      const output = JSON.parse(await fs.readFile(path.join(r.outputDir, name), 'utf8'));
+      assert.equal(output.records[1].startedAt, null); assert.equal(output.records[1].completedAt, null);
+    }
+  }
+  delete f.checkpoint.results[1].duplicateOf; await f.save();
+  const r = await aggregate(f);
+  assert.equal(r.status, 'failed'); assert.equal(r.traceIntegrity[1].valid, false);
+});
+
+test('failed processingStatus contradicting completed status prevents a full pass', async () => {
+  const f = await fixture(); f.checkpoint.results[0].processingStatus = 'failed'; await f.save();
+  const r = await aggregate(f);
+  assert.equal(r.status, 'failed'); assert.equal(r.records[0].status, 'failed');
+  assert.ok(r.traceIntegrity[0].missing.some(x => x.includes('processingStatus/status contradiction')));
+});
+
+test('malformed fieldCrops objects with non-callable some become integrity issues without crashing', async () => {
+  const f = await fixture(10);
+  for (const [i, fieldCrops] of [{ some: true }, { some: 'invalid' }, {}, null].entries()) {
+    const t = trace(f.inventory[i].sourceSha256); t.items[0].candidates[0].fieldCrops = fieldCrops;
+    await fs.writeFile(f.checkpoint.results[i].tracePath, JSON.stringify(t));
+  }
+  const r = await aggregate(f);
+  for (const check of r.traceIntegrity.slice(0, 4)) {
+    assert.equal(check.valid, false); assert.ok(check.missing.some(x => x.includes('fieldCrops')));
+  }
+});
+
 test('complete 500 records produce four linked outputs without overwriting prior evidence', async () => {
   const f = await fixture();
   const before = await fs.readFile(path.join(f.runDir, 'checkpoint.json'), 'utf8');
