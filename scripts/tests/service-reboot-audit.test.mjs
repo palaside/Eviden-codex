@@ -29,13 +29,51 @@ test('restart records stop/wait/start/wait without claiming OS reboot', () => {
   assert.deepEqual(r.result.states.map(x => x.state), ['Running', 'Stopped', 'Running']);
 });
 
-test('stop timeout is not_run and restoration is attempted', () => {
+test('stop timeout while still Running is not_run and does not submit another start', () => {
   const r = ps(`${recovery}
     $r=Invoke-ServiceRecovery -ReadState $read -StopAction { $global:actions+='stop' } -StartAction $start -TimeoutSeconds 0;
     @{result=$r;actions=$global:actions}|ConvertTo-Json -Depth 8 -Compress`);
   assert.equal(r.result.status, 'not_run');
   assert.match(r.result.blocker, /Timeout.*Stopped/);
-  assert.deepEqual(r.actions, ['stop', 'start']);
+  assert.deepEqual(r.actions, ['stop']);
+  assert.equal(r.result.restoration.status, 'recovered');
+});
+
+test('stop timeout waits for terminal Stopped before restoration and verifies Running', () => {
+  const r = ps(`${recovery}
+    $global:pendingReads=0;
+    $read={if($global:state -eq 'StopPending'){$global:pendingReads++;if($global:pendingReads -gt 2){$global:state='Stopped'}};$global:state};
+    $stop={$global:actions+='stop';$global:state='StopPending'};
+    $start={$global:actions+="start:$global:state";if($global:state -ne 'Stopped'){throw 'start before terminal Stopped'};$global:state='Running'};
+    $r=Invoke-ServiceRecovery -ReadState $read -StopAction $stop -StartAction $start -TimeoutSeconds 0;
+    @{result=$r;actions=$global:actions}|ConvertTo-Json -Depth 8 -Compress`);
+  assert.equal(r.result.status, 'not_run');
+  assert.match(r.result.blocker, /Timeout.*Stopped.*StopPending/);
+  assert.equal(r.result.restoration.status, 'recovered');
+  assert.deepEqual(r.actions, ['stop', 'start:Stopped']);
+  assert.deepEqual(r.result.states.map(x => x.state), ['Running', 'StopPending', 'Stopped', 'Running']);
+});
+
+test('permanent StopPending exhausts restoration window without starting', () => {
+  const r = ps(`${recovery}
+    $timer=[Diagnostics.Stopwatch]::StartNew();
+    $r=Invoke-ServiceRecovery -ReadState $read -StopAction {$global:actions+='stop';$global:state='StopPending'} -StartAction $start -TimeoutSeconds 1;
+    @{result=$r;actions=$global:actions;elapsed=$timer.Elapsed.TotalSeconds}|ConvertTo-Json -Depth 8 -Compress`);
+  assert.equal(r.result.status, 'not_run');
+  assert.equal(r.result.restoration.status, 'not_run');
+  assert.match(r.result.restoration.blocker, /Timeout.*Stopped.*StopPending/);
+  assert.deepEqual(r.actions, ['stop']);
+  assert.ok(r.elapsed >= 2 && r.elapsed < 4, `stop and restoration windows: ${r.elapsed}s`);
+});
+
+test('restoration start alone cannot claim recovered before Running', () => {
+  const r = ps(`${recovery}
+    $global:pendingReads=0;
+    $read={if($global:state -eq 'StopPending'){$global:pendingReads++;if($global:pendingReads -gt 2){$global:state='Stopped'}};$global:state};
+    Invoke-ServiceRecovery -ReadState $read -StopAction {$global:state='StopPending'} -StartAction {$global:state='StartPending'} -TimeoutSeconds 0 | ConvertTo-Json -Depth 8 -Compress`);
+  assert.equal(r.status, 'not_run');
+  assert.equal(r.restoration.status, 'not_run');
+  assert.match(r.restoration.blocker, /Timeout.*Running.*StartPending/);
 });
 
 test('start timeout and stop errors retain failure and restoration evidence', () => {
@@ -110,6 +148,64 @@ const healthy = `
   $m=[pscustomobject]@{buildId='build';gitCommit='commit'};
   function Get-RuntimeEvidence { [pscustomobject]@{serviceName='svc';status='Running';startType='Auto';binaryPath='svc.exe';BUILD_ID='build';sourceBuildId='build';httpBuildId='build';gitCommit='commit';httpStatus=200;NEXT_DIST_DIR='dist';timestamp='now';serviceOwnsListener=$true;errors=@()} }
 `;
+
+test('AfterReboot waits for service and HTTP before identity preflight, retaining gates and artifacts', () => {
+  const base = mkdtempSync(path.join(tmpdir(), 'task5-ready-')).replaceAll("'", "''");
+  const r = ps(`${healthy}
+    $global:events=@();$global:serviceReads=0;$global:httpReads=0;$global:shortCalls=0;
+    function Get-AuditBoot {'new-boot'}
+    function Restart-Computer {throw 'MUST NOT REBOOT'}
+    function Get-Service {$global:serviceReads++;$s=if($global:serviceReads -le 2){'StartPending'}else{'Running'};$global:events+=$s;[pscustomobject]@{Status=$s}}
+    function Invoke-WebRequest {$global:httpReads++;$global:events+='http';if($global:httpReads -eq 1){throw 'connection refused'};[pscustomobject]@{StatusCode=200}}
+    $getHealthy=(Get-Command Get-RuntimeEvidence).ScriptBlock;
+    function Get-RuntimeEvidence {$global:events+='identity';$e=& $getHealthy;if($global:httpReads -lt 2){$e.status='StartPending';$e.httpStatus=503};$e}
+    function Invoke-ShortAuditE2E {$global:shortCalls++;@{status='review_required'}}
+    $prior=Join-Path '${base}' 'prior.json';
+    Write-AuditJson $prior @{mode='Reboot';serviceName='digitalevidenceenterprise.exe';selectedRun=$m;reboot=@{status='requested';bootBefore='old-boot';machine=[Environment]::MachineName}};
+    $r=Invoke-RecoveryAudit -Mode AfterReboot -PriorReportPath $prior -OutDir (Join-Path '${base}' 'audit') -RunMetadata $m -FixturePath '${script.replaceAll("'", "''")}' -TimeoutSeconds 3;
+    @{result=$r;events=$global:events;shortCalls=$global:shortCalls}|ConvertTo-Json -Depth 10 -Compress`);
+  assert.equal(r.result.status, 'completed');
+  assert.equal(r.result.reboot.status, 'observed');
+  assert.equal(r.result.recovery.kind, 'os_reboot');
+  assert.equal(r.shortCalls, 1);
+  assert.ok(r.events.indexOf('identity') > r.events.lastIndexOf('http'));
+  assert.equal(r.events.filter(x => x === 'http').length, 2);
+  assert.deepEqual(r.events.slice(0, 2), ['StartPending', 'StartPending']);
+  const out = path.join(base, 'audit');
+  assert.equal(JSON.parse(readFileSync(path.join(out, 'runtime-before.json'))).status, 'Running');
+  assert.equal(JSON.parse(readFileSync(path.join(out, 'health-after-reboot.json'))).status, 'healthy');
+});
+
+test('AfterReboot readiness is bounded and a ready wrong identity still fails closed', () => {
+  const base = mkdtempSync(path.join(tmpdir(), 'task5-ready-negative-')).replaceAll("'", "''");
+  const results = ps(`${healthy}
+    function Get-AuditBoot {'new-boot'}
+    function Restart-Computer {throw 'MUST NOT REBOOT'}
+    $global:shortCalls=0;function Invoke-ShortAuditE2E {$global:shortCalls++;throw 'MUST NOT BROWSE'}
+    $getHealthy=(Get-Command Get-RuntimeEvidence).ScriptBlock;
+    function Get-Service {[pscustomobject]@{Status=$(if($global:scenario -eq 'service'){'StartPending'}else{'Running'})}}
+    function Invoke-WebRequest {if($global:scenario -eq 'http'){[pscustomobject]@{StatusCode=503}}else{[pscustomobject]@{StatusCode=200}}}
+    function Get-RuntimeEvidence {$e=& $getHealthy;$e.httpBuildId='wrong';$e}
+    $prior=Join-Path '${base}' 'prior.json';
+    Write-AuditJson $prior @{mode='Reboot';serviceName='digitalevidenceenterprise.exe';selectedRun=$m;reboot=@{status='requested';bootBefore='old-boot';machine=[Environment]::MachineName}};
+    $results=@();foreach($scenario in @('service','http','identity')){
+      $global:scenario=$scenario;$timer=[Diagnostics.Stopwatch]::StartNew();
+      $r=Invoke-RecoveryAudit -Mode AfterReboot -PriorReportPath $prior -OutDir (Join-Path '${base}' $scenario) -RunMetadata $m -TimeoutSeconds 1;
+      $results+=@{result=$r;elapsed=$timer.Elapsed.TotalSeconds}
+    };@{cases=$results;shortCalls=$global:shortCalls}|ConvertTo-Json -Depth 10 -Compress`);
+  assert.equal(results.shortCalls, 0);
+  for (const [i, c] of results.cases.entries()) {
+    assert.equal(c.result.status, 'not_run');
+    assert.equal(c.result.shortE2E.status, 'not_run');
+    assert.ok(c.elapsed < 4, `bounded readiness: ${c.elapsed}s`);
+    assert.match(c.result.blocker, i < 2 ? /Timeout.*readiness/ : /Preflight rejected.*httpBuildId mismatch/);
+  }
+  for (const scenario of ['service', 'http', 'identity']) {
+    const out = path.join(base, scenario);
+    assert.equal(JSON.parse(readFileSync(path.join(out, 'service-reboot-report.json'))).status, 'not_run');
+    assert.equal(JSON.parse(readFileSync(path.join(out, 'short-e2e', 'report.json'))).consoleErrors, null);
+  }
+});
 test('audit orchestration records restart fallback and blocks browser on post-recovery mismatch', () => {
   const base = mkdtempSync(path.join(tmpdir(), 'task5-flow-')).replaceAll("'", "''");
   const r = ps(`${healthy}

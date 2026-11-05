@@ -50,13 +50,41 @@ function Invoke-ServiceRecovery {
     $result.blocker = $_.Exception.Message
     if ($stopAttempted) {
       try {
-        & $StartAction | Out-Null
+        $state = [string](& $ReadState)
+        if ($state -notin @('Running', 'StartPending')) {
+          # A timed-out stop may still complete. Never start while StopPending.
+          Wait-AuditState $ReadState 'Stopped' $TimeoutSeconds $states
+          & $StartAction | Out-Null
+        }
         Wait-AuditState $ReadState 'Running' $TimeoutSeconds $states
         $result.restoration = @{ status = 'recovered' }
       } catch { $result.restoration = @{ status = 'not_run'; blocker = $_.Exception.Message } }
     }
   }
   [pscustomobject]$result
+}
+
+function Wait-AuditReadiness {
+  param([scriptblock]$ReadState, [int]$TimeoutSeconds, $States)
+  # Service startup and HTTP share one readiness budget, before identity collection.
+  $timer = [Diagnostics.Stopwatch]::StartNew()
+  $last = 'HTTP not ready'
+  do {
+    $state = [string](& $ReadState)
+    $States.Add([pscustomobject]@{ timestamp = [DateTime]::UtcNow.ToString('o'); expected = 'Running'; state = $state })
+    $remaining = $TimeoutSeconds - $timer.Elapsed.TotalSeconds
+    if ($state -eq 'Running' -and $remaining -gt 0) {
+      try {
+        # Invoke-WebRequest accepts whole seconds; never use its default long timeout.
+        $http = Invoke-WebRequest -Uri 'http://127.0.0.1:3450/' -Method Get -UseBasicParsing -TimeoutSec ([Math]::Max(1, [Math]::Ceiling($remaining))) -MaximumRedirection 0 -ErrorAction Stop
+        $last = "HTTP status $($http.StatusCode)"
+        if ($http.StatusCode -eq 200 -and $timer.Elapsed.TotalSeconds -le $TimeoutSeconds) { return }
+      } catch { $last = $_.Exception.Message }
+    }
+    $remaining = $TimeoutSeconds - $timer.Elapsed.TotalSeconds
+    if ($remaining -le 0) { throw "Timeout waiting for service/HTTP readiness; last state $state; $last" }
+    Start-Sleep -Milliseconds ([Math]::Min(250, [Math]::Ceiling($remaining * 1000)))
+  } while ($true)
 }
 
 function Test-RecoveryHealth {
@@ -162,6 +190,18 @@ function Invoke-RecoveryAudit {
   $health = @{ status = 'not_run'; blocker = 'No recovery boundary observed; preflight HTTP is not post-recovery evidence' }
   $dispatchReboot = $false
   try {
+    $readState = { [string](Get-Service -Name $ServiceName -ErrorAction Stop).Status }
+    if ($Mode -eq 'AfterReboot') {
+      if (-not $PriorReportPath) { throw 'AfterReboot requires PriorReportPath from explicit Reboot mode' }
+      $prior = Get-Content -LiteralPath $PriorReportPath -Raw | ConvertFrom-Json
+      $bootAfter = Get-AuditBoot
+      if ($prior.mode -ne 'Reboot' -or $prior.reboot.status -ne 'requested' -or $prior.reboot.machine -cne [Environment]::MachineName -or $prior.serviceName -cne $ServiceName -or $prior.selectedRun.buildId -cne $RunMetadata.buildId -or $prior.selectedRun.gitCommit -cne $RunMetadata.gitCommit -or -not (Test-BootBoundary $prior.reboot.bootBefore $bootAfter)) { throw 'OS reboot boundary/selected runtime not established from prior intent' }
+      $states = [Collections.Generic.List[object]]::new()
+      $report.reboot = @{ status = 'observed'; bootBefore = $prior.reboot.bootBefore; bootAfter = $bootAfter; priorReportPath = $PriorReportPath }
+      $report.recovery = @{ kind = 'os_reboot'; status = 'not_run'; states = $states }
+      Wait-AuditReadiness $readState $TimeoutSeconds $states
+      $report.recovery.status = 'recovered'
+    }
     $before = Get-RuntimeEvidence -ServiceName $ServiceName -SourceBuildDir $SourceBuildDir -RepoRoot $RepoRoot
     $report.preflight = Test-RecoveryHealth $before $RunMetadata
     Write-AuditJson (Join-Path $OutDir 'runtime-before.json') $before
@@ -174,7 +214,6 @@ function Invoke-RecoveryAudit {
       $report.blocker = $report.reboot.blocker
       $dispatchReboot = $true
     } else {
-      $readState = { [string](Get-Service -Name $ServiceName -ErrorAction Stop).Status }
       if ($Mode -eq 'Restart') {
         if (-not $FixturePath -or -not (Test-Path -LiteralPath $FixturePath -PathType Leaf)) { throw 'One explicit real-slip FixturePath is required before restart' }
         # SCM commands return after submitting the request; bounded state polling follows.
@@ -182,15 +221,6 @@ function Invoke-RecoveryAudit {
         $startAction = { $output = & sc.exe start $ServiceName 2>&1; if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1056) { throw "sc.exe start failed: $output" } }
         $report.recovery = Invoke-ServiceRecovery -ReadState $readState -StopAction $stopAction -StartAction $startAction -TimeoutSeconds $TimeoutSeconds
         if ($report.recovery.status -ne 'recovered') { throw $report.recovery.blocker }
-      } else {
-        if (-not $PriorReportPath) { throw 'AfterReboot requires PriorReportPath from explicit Reboot mode' }
-        $prior = Get-Content -LiteralPath $PriorReportPath -Raw | ConvertFrom-Json
-        $bootAfter = Get-AuditBoot
-        if ($prior.mode -ne 'Reboot' -or $prior.reboot.status -ne 'requested' -or $prior.reboot.machine -cne [Environment]::MachineName -or $prior.serviceName -cne $ServiceName -or $prior.selectedRun.buildId -cne $RunMetadata.buildId -or $prior.selectedRun.gitCommit -cne $RunMetadata.gitCommit -or -not (Test-BootBoundary $prior.reboot.bootBefore $bootAfter)) { throw 'OS reboot boundary/selected runtime not established from prior intent' }
-        $states = [Collections.Generic.List[object]]::new()
-        Wait-AuditState $readState 'Running' $TimeoutSeconds $states
-        $report.reboot = @{ status = 'observed'; bootBefore = $prior.reboot.bootBefore; bootAfter = $bootAfter; priorReportPath = $PriorReportPath }
-        $report.recovery = @{ kind = 'os_reboot'; status = 'recovered'; states = $states }
       }
       $after = Get-RuntimeEvidence -ServiceName $ServiceName -SourceBuildDir $SourceBuildDir -RepoRoot $RepoRoot
       $validation = Test-RecoveryHealth $after $RunMetadata
