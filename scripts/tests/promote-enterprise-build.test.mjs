@@ -15,6 +15,18 @@ const cases = [
   { name: 'UNC absolute paths', source: '\\\\build-server\\share\\source build', target: '\\\\build-server\\share\\target build' },
   { name: 'absolute source and relative target', source: 'Z:\\builds\\source', target: 'release/target' },
   { name: 'relative source and absolute target', source: 'staging/source', target: 'Z:\\builds\\target' },
+  { name: 'dot relative paths retain Join-Path behavior', source: '.\\staging\\source', target: '..\\release\\target',
+    expectedSource: root + '\\.\\staging\\source', expectedTarget: root + '\\..\\release\\target' },
+  { name: 'rooted paths use the project drive root', source: '\\staging\\source', target: '\\release\\target',
+    expectedSource: path.win32.join(path.win32.parse(root).root, 'staging/source'),
+    expectedTarget: path.win32.join(path.win32.parse(root).root, 'release/target') },
+  { name: 'rooted paths normalize parent segments', source: '\\staging\\..\\source', target: '/release/../target',
+    expectedSource: path.win32.join(path.win32.parse(root).root, 'source'),
+    expectedTarget: path.win32.join(path.win32.parse(root).root, 'target') },
+  { name: 'drive-relative source is rejected before promotion', source: 'C:staging\\source',
+    expectedError: 'Drive-relative build path is ambiguous: C:staging\\source. Use an absolute path.' },
+  { name: 'drive-relative target is rejected before promotion', target: 'C:staging\\source',
+    expectedError: 'Drive-relative build path is ambiguous: C:staging\\source. Use an absolute path.' },
 ];
 
 // Parse the real script, but execute ONLY its three path assignments. Never
@@ -40,7 +52,11 @@ foreach ($command in $commands) {
 }
 $methods = $pathAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)
 foreach ($method in $methods) {
-  if ($method.Expression.Extent.Text -ne '[System.IO.Path]' -or $method.Member.Value -ne 'IsPathRooted' -or -not $method.Static) {
+  $isPathMethod = $method.Static -and $method.Expression.Extent.Text -eq '[System.IO.Path]' -and
+    $method.Member.Value -in @('IsPathRooted', 'GetFullPath', 'GetPathRoot')
+  $isRootRemoval = -not $method.Static -and $method.Expression.Extent.Text -in @('$BuildSource', '$BuildTarget') -and
+    $method.Member.Value -eq 'Substring' -and $method.Arguments.Count -eq 1 -and $method.Arguments[0].Extent.Text -eq '1'
+  if (-not ($isPathMethod -or $isRootRemoval)) {
     throw 'Unsafe method in path assignments'
   }
 }
@@ -57,31 +73,42 @@ $results = foreach ($case in (ConvertFrom-Json $env:PROMOTE_TEST_CASES)) {
     $BuildTarget = $defaults.BuildTarget
     if ($null -ne $case.source) { $BuildSource = $case.source }
     if ($null -ne $case.target) { $BuildTarget = $case.target }
-    . ([scriptblock]::Create('param($PSScriptRoot)' + [Environment]::NewLine + $code)) (Split-Path -Parent $env:PROMOTE_TEST_SCRIPT)
-    @{ source = $sourcePath; target = $targetPath; name = $case.name }
+    try {
+      . ([scriptblock]::Create('param($PSScriptRoot)' + [Environment]::NewLine + $code)) (Split-Path -Parent $env:PROMOTE_TEST_SCRIPT)
+      @{ source = $sourcePath; target = $targetPath; name = $case.name }
+    } catch {
+      @{ error = $_.Exception.Message; name = $case.name }
+    }
   } $case $defaults $code
 }
 ConvertTo-Json -InputObject @($results) -Compress
 `;
 
 for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : ['pwsh']) {
-  test(`${shell}: PowerShell syntax and isolated promotion path contract`, async (t) => {
-    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand',
-      Buffer.from(harness, 'utf16le').toString('base64')], {
-      encoding: 'utf8', timeout: 20000, cwd: tmpdir(),
-      env: { ...process.env, PROMOTE_TEST_SCRIPT: script, PROMOTE_TEST_CASES: JSON.stringify(cases) },
-    });
-    assert.equal(result.error, undefined);
-    assert.equal(result.status, 0, result.stderr || result.stdout);
-    const actual = JSON.parse(result.stdout.trim());
-    assert.equal(actual.length, cases.length);
-    for (const [index, input] of cases.entries()) {
-      await t.test(input.name, () => {
-        const source = input.source ?? 'build-output-e2e-20261028-final2';
-        const target = input.target ?? 'build-output-enterprise';
-        assert.equal(actual[index].source, path.isAbsolute(source) ? source : path.join(root, source));
-        assert.equal(actual[index].target, path.isAbsolute(target) ? target : path.join(root, target));
+  for (const cwd of [tmpdir(), root]) {
+    test(`${shell} from ${cwd}: PowerShell syntax and isolated promotion path contract`, async (t) => {
+      const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+        Buffer.from(harness, 'utf16le').toString('base64')], {
+        encoding: 'utf8', timeout: 20000, cwd,
+        env: { ...process.env, PROMOTE_TEST_SCRIPT: script, PROMOTE_TEST_CASES: JSON.stringify(cases) },
       });
-    }
-  });
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const actual = JSON.parse(result.stdout.trim());
+      assert.equal(actual.length, cases.length);
+      for (const [index, input] of cases.entries()) {
+        await t.test(input.name, () => {
+          if (input.expectedError) {
+            assert.equal(actual[index].error, input.expectedError);
+            return;
+          }
+          assert.equal(actual[index].error, undefined);
+          const source = input.source ?? 'build-output-e2e-20261028-final2';
+          const target = input.target ?? 'build-output-enterprise';
+          assert.equal(actual[index].source, input.expectedSource ?? (path.isAbsolute(source) ? source : path.join(root, source)));
+          assert.equal(actual[index].target, input.expectedTarget ?? (path.isAbsolute(target) ? target : path.join(root, target)));
+        });
+      }
+    });
+  }
 }

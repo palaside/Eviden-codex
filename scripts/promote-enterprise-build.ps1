@@ -9,8 +9,22 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$sourcePath = if ([System.IO.Path]::IsPathRooted($BuildSource)) { $BuildSource } else { Join-Path $projectRoot $BuildSource }
-$targetPath = if ([System.IO.Path]::IsPathRooted($BuildTarget)) { $BuildTarget } else { Join-Path $projectRoot $BuildTarget }
+# Drive-relative paths require caller state; reject them before any preflight.
+# A single leading separator uses the project's volume root, not the caller's.
+$sourcePath = if ($BuildSource -match '^[a-z]:($|[^\\/])') {
+  throw "Drive-relative build path is ambiguous: $BuildSource. Use an absolute path."
+} elseif ($BuildSource -match '^([a-z]:[\\/]|[\\/]{2})') {
+  $BuildSource
+} elseif ([System.IO.Path]::IsPathRooted($BuildSource)) {
+  [System.IO.Path]::GetFullPath(([System.IO.Path]::GetPathRoot($projectRoot) + $BuildSource.Substring(1)))
+} else { Join-Path $projectRoot $BuildSource }
+$targetPath = if ($BuildTarget -match '^[a-z]:($|[^\\/])') {
+  throw "Drive-relative build path is ambiguous: $BuildTarget. Use an absolute path."
+} elseif ($BuildTarget -match '^([a-z]:[\\/]|[\\/]{2})') {
+  $BuildTarget
+} elseif ([System.IO.Path]::IsPathRooted($BuildTarget)) {
+  [System.IO.Path]::GetFullPath(([System.IO.Path]::GetPathRoot($projectRoot) + $BuildTarget.Substring(1)))
+} else { Join-Path $projectRoot $BuildTarget }
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourcePath "BUILD_ID"))) {
   throw "Production build is incomplete: $sourcePath\BUILD_ID was not found"

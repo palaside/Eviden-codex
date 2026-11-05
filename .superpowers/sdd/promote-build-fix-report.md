@@ -56,5 +56,55 @@ run, filesystem copy/delete, application execution, or OCR/provider/Xerox change
 was performed. Tests create no fixtures or temporary files and require no admin
 execution. Existing unrelated working-tree files are excluded from the commit.
 
-No blocker remains for the requested script-contract scope. Actual promotion and
-service health remain untested by explicit instruction.
+The original checks above did not cover rooted-but-not-fully-qualified paths.
+Reviewer P2 identified that gap; the follow-up below supersedes the original
+claim of no remaining blocker for path independence.
+
+## Reviewer P2 follow-up (2026-11-05)
+
+Scope: only path classification in the two source/target assignments, focused
+regressions, and this report. `IsPathRooted` alone classified both `\staging\source`
+and `C:staging\source` as directly usable, leaving caller-dependent paths.
+
+The safe contract now applies identically to source and target:
+
+- Ordinary relative paths still use the existing project-root `Join-Path`,
+  including its literal `.`/`..` behavior.
+- A single leading slash/backslash uses the project's volume root and is
+  normalized with `GetFullPath`. Here `\staging\source` becomes
+  `D:\staging\source`, regardless of the caller's drive/directory.
+- Drive-relative paths such as `C:staging\source` are rejected with an explicit
+  request for an absolute path, before filesystem/service preflight. No per-drive
+  current directory is guessed.
+- Drive-absolute and UNC paths remain direct, unchanged inputs.
+
+TDD and verification evidence:
+
+- Added regression cases before modifying production source. RED command:
+  `node --test scripts/tests/promote-enterprise-build.test.mjs` exited 1.
+  The four P2 cases (rooted, rooted parent normalization, drive-relative source,
+  drive-relative target) failed in each of four engine/cwd combinations. The
+  original seven cases passed in all combinations. A fifth new test initially
+  expected dot-segment normalization for ordinary relative paths; its oracle
+  was corrected to preserve the existing `Join-Path` behavior, without changing
+  that production behavior. Initial total: 28 passes, 24 failures including
+  four parent tests and four dot-case assertion failures.
+- GREEN: focused suite exited 0 with 52 passes, zero failures/skips: 12 cases
+  plus one parent test for each of Windows PowerShell and PowerShell 7, from
+  both OS temp on C: and the project directory on D:.
+- Both engines parse the full production script for syntax and execute only
+  its three path assignments. Updated the isolated harness method allowlist
+  for static Path `GetFullPath`/`GetPathRoot` and the exact `Substring(1)` calls.
+  No production promotion script invocation/dot-sourcing occurs.
+- `node --check scripts/tests/promote-enterprise-build.test.mjs` and scoped
+  `git diff --check` exited 0. Git reported expected LF-to-CRLF conversion
+  warnings, not whitespace errors.
+- Static comparison against pre-fix HEAD confirms all source outside the
+  path resolver block is unchanged, including parameters, preflight,
+  ShouldProcess, service control, copy, health checks, and output.
+
+Result: the isolated resolver contract passes with synthetic path strings in
+both local engines and on both caller drives. This is not a real promotion
+end-to-end test. Build/share existence, copying, actual promotion, restart,
+batch/delete, provider, Xerox, and OCR were not exercised. No dependencies,
+infrastructure, or other tracked/untracked work were changed for this fix.
