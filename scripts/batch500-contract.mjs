@@ -5,6 +5,8 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 const SHA256 = /^[a-f0-9]{64}$/;
+const RUN_SCHEMA = "digital-evidence.batch500-run.v1";
+const CHECKPOINT_SCHEMA = "digital-evidence.batch500-checkpoint.v1";
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -34,7 +36,7 @@ export function createBatchRunManifest({ runId, buildId, gitCommit, processingVe
   if (!Array.isArray(batches)) throw new TypeError("batches must be an array");
   const identity = { buildId, gitCommit, processingVersion, inventory: canonicalInventory(inventory), batches: stable(batches) };
   return {
-    schema: "digital-evidence.batch500-run.v1",
+    schema: RUN_SCHEMA,
     runId,
     runIdentity: createHash("sha256").update(JSON.stringify(stable(identity))).digest("hex"),
     ...identity,
@@ -88,7 +90,9 @@ export async function readCheckpoint(filePath) {
 export function isCheckpointCompatible(checkpoint, manifest) {
   const reasons = [];
   if (!checkpoint || !manifest) return { compatible: false, reasons: ["checkpoint or manifest missing"] };
-  for (const field of ["schema", "buildId", "gitCommit", "processingVersion", "runIdentity"]) {
+  if (manifest.schema !== RUN_SCHEMA) reasons.push(`unsupported manifest schema: ${manifest.schema}`);
+  if (checkpoint.schema !== CHECKPOINT_SCHEMA) reasons.push(`unsupported checkpoint schema: ${checkpoint.schema}`);
+  for (const field of ["buildId", "gitCommit", "processingVersion", "runIdentity"]) {
     if (!checkpoint[field] || checkpoint[field] !== manifest[field]) reasons.push(`${field} mismatch or missing`);
   }
   try {
@@ -104,8 +108,20 @@ export function isCheckpointCompatible(checkpoint, manifest) {
   return { compatible: reasons.length === 0, reasons };
 }
 
+// Shared by the browser runner and checkpoint regression: successful processing
+// is independent of whether the evidence still requires human review.
+export function finalizeBatchResult(result, { requireReviewDerivedPreview = true } = {}) {
+  const failed = Boolean(result.error || result.externalProviderCall || result.pageErrors?.length
+    || result.assertions?.fieldAudit?.passed !== true
+    || (requireReviewDerivedPreview && result.assertions?.reviewDerivedPreviewVisible === false));
+  result.processingStatus = failed ? "failed" : "completed";
+  if (failed) result.status = "failed";
+  result.completedAt = new Date().toISOString();
+}
+
 function hasCompletedTrace(result) {
-  if (result?.status !== "completed" || !SHA256.test(result.sourceSha256 || "") || !result.tracePath) return false;
+  if (result?.processingStatus !== "completed" || !["completed", "review_required"].includes(result.status)
+    || result.error || !SHA256.test(result.sourceSha256 || "") || !result.tracePath) return false;
   try {
     const trace = JSON.parse(readFileSync(result.tracePath, "utf8"));
     return Array.isArray(trace.items) && trace.items.some((item) => (

@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { auditTraceCandidates } from "./e2e-field-audit.mjs";
-import { writeAtomicJson } from "./batch500-contract.mjs";
+import { finalizeBatchResult, writeAtomicJson } from "./batch500-contract.mjs";
 
 const root = process.cwd();
 const baseUrl = process.env.E2E_BASE_URL || "http://127.0.0.1:3450/";
@@ -44,7 +44,7 @@ const writePartialReport = async () => {
 for (const [index, fixture] of fixtures.entries()) {
   const page = await browser.newPage({ viewport: { width: 1662, height: 1548 } });
   page.setDefaultTimeout(30_000);
-  const result = { index: index + 1, fixture, fixturePath: fixture, sourceSha256: null, buildId, processingVersion, status: "not_run", tracePath: null, startedAt: new Date().toISOString(), completedAt: null, steps: [], apiResponses: [], consoleErrors: [], pageErrors: [] };
+  const result = { index: index + 1, fixture, fixturePath: fixture, sourceSha256: null, buildId, processingVersion, status: "not_run", processingStatus: "not_run", tracePath: null, startedAt: new Date().toISOString(), completedAt: null, steps: [], apiResponses: [], consoleErrors: [], pageErrors: [] };
   page.on("console", (message) => { if (message.type() === "error") result.consoleErrors.push(message.text()); });
   page.on("pageerror", (error) => result.pageErrors.push(error.stack || error.message));
   page.on("response", (response) => {
@@ -128,9 +128,7 @@ for (const [index, fixture] of fixtures.entries()) {
     result.error = error instanceof Error ? error.stack || error.message : String(error);
     await page.screenshot({ path: path.join(outDir, `${String(index + 1).padStart(3, "0")}-error.png`), fullPage: true }).catch(() => {});
   } finally {
-    if (result.externalProviderCall || result.pageErrors.length || result.assertions?.fieldAudit?.passed !== true
-      || (requireReviewDerivedPreview && result.assertions?.reviewDerivedPreviewVisible === false)) result.status = "failed";
-    result.completedAt = new Date().toISOString();
+    finalizeBatchResult(result, { requireReviewDerivedPreview });
     results.push(result);
     await writePartialReport();
     await page.close();
