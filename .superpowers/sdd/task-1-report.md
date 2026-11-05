@@ -665,7 +665,7 @@ test at scripts\tests\batch500-contract.test.mjs:89:1
 ✖ compatible checkpoint permits a different run label and result progress (2.6613ms)
   AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
   + actual - expected
-  
+
     {
   +   compatible: false,
   +   reasons: [
@@ -674,7 +674,7 @@ test at scripts\tests\batch500-contract.test.mjs:89:1
   -   compatible: true,
   -   reasons: []
     }
-  
+
       at TestContext.<anonymous> (file:///D:/Project/Digital%20Evi%20-%20Codex/scripts/tests/batch500-contract.test.mjs:91:10)
       at Test.runInAsyncScope (node:async_hooks:226:14)
       at Test.run (node:internal/test_runner/test:1201:25)
@@ -693,9 +693,9 @@ test at scripts\tests\batch500-contract.test.mjs:89:1
 test at scripts\tests\batch500-contract.test.mjs:94:1
 ✖ compatibility requires supported manifest and checkpoint schemas even when unknown schemas match (7.5759ms)
   AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:
-  
+
     assert.ok(invalidManifest.reasons.some((reason) => reason.includes("manifest schema")))
-  
+
       at TestContext.<anonymous> (file:///D:/Project/Digital%20Evi%20-%20Codex/scripts/tests/batch500-contract.test.mjs:101:12)
       at Test.runInAsyncScope (node:async_hooks:226:14)
       at Test.run (node:internal/test_runner/test:1201:25)
@@ -874,4 +874,6 @@ is excluded from the commit.
   unrelated project files were changed. No destructive command was run.
 - No blocker remains for these two Task 1 review findings.
 
-
+Staged whitespace follow-up: the first staged check caught trailing spaces in
+quoted RED output and an extra final blank line. These were removed only from
+this appended fix report; historical report content and implementation were unchanged.
