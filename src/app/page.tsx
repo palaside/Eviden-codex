@@ -40,6 +40,7 @@ import { finalizeSlipCandidates } from "@/utils/finalize-slip-candidates.mjs";
 import { buildSlipExtractionStatus, buildSlipQrWarning } from "@/utils/slip-extraction-status.mjs";
 import { selectSlipTemplate } from "@/utils/slip-template-registry.mjs";
 import { buildTemplateFieldPlan, mergeTemplateAndOcrFields, toCanonicalFieldName } from "@/utils/template-field-crops.mjs";
+import { buildDiagnosticOcrFieldPlan } from "@/utils/diagnostic-ocr-field-plan.mjs";
 import { mergeGeminiFieldBundle } from "@/utils/gemini-field-bundle.mjs";
 import { fetchWithTimeout } from "@/utils/fetch-with-timeout.mjs";
 
@@ -77,7 +78,18 @@ async function buildLocalFieldCrops(record: EmbeddedSlipRecord): Promise<NonNull
     rawText: record.data.raw_text,
   });
   const plan = buildTemplateFieldPlan(template, { width: image.naturalWidth, height: image.naturalHeight });
-  const fields = mergeTemplateAndOcrFields(plan, record.ocrTextBoxes || []);
+  const ocrBoxes = record.ocrTextBoxes || [];
+  const mergedFields = mergeTemplateAndOcrFields(plan, ocrBoxes);
+  // A decoded QR can prove that this is a slip even when its bank/template is
+  // still unknown. Keep OCR observations from the diagnostic trace as crops,
+  // but deliberately do not label them as sender/receiver/amount fields.
+  // This preserves provenance without turning uncertain text into a fact.
+  const fields = mergedFields.length > 0
+    ? mergedFields
+    : buildDiagnosticOcrFieldPlan(record.ocrDiagnosticTrace, {
+      width: image.naturalWidth,
+      height: image.naturalHeight,
+    });
   const result: NonNullable<EmbeddedSlipRecord["fieldCrops"]> = [];
   for (const entry of fields) {
     const box = entry.ocrBox;
@@ -464,6 +476,16 @@ type DuplicateAuditMatrix = {
 const subscribeToHydration = () => () => {};
 const getClientHydrationSnapshot = () => true;
 const getServerHydrationSnapshot = () => false;
+type Batch500VisibleStatus = {
+  state: "running" | "stalled" | "stopped" | "idle" | "unavailable";
+  updatedAt?: string | null;
+  buildId?: string | null;
+  total?: number;
+  terminal?: number;
+  pending?: number;
+  reviewRequired?: number;
+  failed?: number;
+};
 
 export default function MasterEvidenceWorkspace() {
   const [currentStep, setCurrentStep] = useState(1);
@@ -537,6 +559,24 @@ export default function MasterEvidenceWorkspace() {
   const [searchSlipScanStatus, setSearchSlipScanStatus] = useState<SearchSlipScanStatus>({ state: "idle", message: "" });
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [queueRestoreNotice, setQueueRestoreNotice] = useState<string | null>(null);
+  const [batch500Status, setBatch500Status] = useState<Batch500VisibleStatus | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const readStatus = async () => {
+      try {
+        const response = await fetch("/api/operations/batch500-status", { cache: "no-store" });
+        if (!response.ok) return;
+        const status = await response.json() as Batch500VisibleStatus;
+        if (active) setBatch500Status(status);
+      } catch {
+        // Batch progress is supplementary UI only; evidence review remains usable offline.
+      }
+    };
+    void readStatus();
+    const timer = window.setInterval(() => void readStatus(), 15_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
 
   // Step 2: Target Name Matcher & POI Forensic Suite States (Pure Zero State)
   const [targetListSnapshot, setTargetListSnapshot] = useState<TargetPersonItem[]>([]);
@@ -3805,6 +3845,16 @@ export default function MasterEvidenceWorkspace() {
             className="bg-black/30 border border-white/10 px-2 py-0.5 rounded text-slate-200 font-mono text-xs w-36"
           />
           <span className="text-emerald-400 font-bold">● 3453 ONLINE</span>
+          {batch500Status && batch500Status.state !== "idle" && (
+            <span
+              title={batch500Status.updatedAt ? `อัปเดตล่าสุด ${new Date(batch500Status.updatedAt).toLocaleString("th-TH")}` : "ยังไม่มี checkpoint"}
+              className={`font-bold ${batch500Status.state === "running" ? "text-sky-300" : batch500Status.state === "stalled" || batch500Status.state === "stopped" ? "text-amber-300" : "text-slate-400"}`}
+            >
+              {batch500Status.state === "running"
+                ? `● BATCH 500 ${batch500Status.terminal ?? 0}/${batch500Status.total ?? 0} · เหลือ ${batch500Status.pending ?? 0} · fail ${batch500Status.failed ?? 0}`
+                : `● BATCH 500 ${batch500Status.state === "stalled" ? "หยุดอัปเดต" : "ไม่พร้อม"}`}
+            </span>
+          )}
         </div>
       </div>
 

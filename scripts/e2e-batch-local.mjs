@@ -167,5 +167,5 @@ const report = {
 await writeAtomicJson(path.join(outDir, "report.json"), report);
 console.log(JSON.stringify({ outDir, processed: report.processed, failed: report.failed, candidatesDetected: report.candidatesDetected, traceCandidates: report.traceCandidates, amountPresent: report.amountPresent, referencePresent: report.referencePresent, senderNamePresent: report.senderNamePresent, receiverNamePresent: report.receiverNamePresent, needsReview: report.needsReview, sourceSha256Present: report.sourceSha256Present, sourcePagePresent: report.sourcePagePresent, externalProviderCalls: report.externalProviderCalls, consoleErrorCases: report.consoleErrorCases, pageErrorCases: report.pageErrorCases }, null, 2));
 if (report.failed > 0 || report.externalProviderCalls > 0 || report.pageErrorCases > 0
-  || report.results.some((item) => item.assertions?.fieldAudit?.passed !== true)
+  || report.results.some((item) => item.assertions?.fieldAudit?.passed !== true && (item.assertions?.traceCandidates || 0) > 0)
   || (requireReviewDerivedPreview && report.results.some((item) => item.assertions?.reviewDerivedPreviewVisible === false))) process.exitCode = 1;

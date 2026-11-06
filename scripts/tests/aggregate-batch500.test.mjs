@@ -118,6 +118,15 @@ test('a ten-record inventory can never be a full pass', async () => {
   assert.ok(r.issues.some(x => x.includes('500')));
 });
 
+test('an explicit representative expected count permits a complete review-required sample', async () => {
+  const f = await fixture(10);
+  for (const record of f.checkpoint.results) record.status = 'review_required';
+  await f.save();
+  const r = await aggregateBatchReports({ runDir: f.runDir, expectedInventoryPath: f.expectedInventoryPath, expectedCount: 10 });
+  assert.equal(r.status, 'review_required');
+  assert.equal(r.expectedCount, 10);
+});
+
 test('duplicate SHA keeps both paths and distinguishes skipped occurrence from repeated processing', async () => {
   const f = await fixture(10);
   f.inventory[1].sourceSha256 = f.inventory[0].sourceSha256;
@@ -144,6 +153,8 @@ test('unparseable, empty and SHA-mismatched traces are reported without losing r
 
 test('trace requires candidate SHA and every crop evidence component with strict numeric validation', () => {
   assert.equal(validateTraceEvidence(trace(sha(0))).valid, true);
+  const noRecognition = trace(sha(0)); noRecognition.items[0].candidates[0].fieldCrops[0].rawOcr = null;
+  assert.equal(validateTraceEvidence(noRecognition).valid, true, 'null preserves explicit no-recognition evidence');
   for (const key of ['cropSha256', 'bounds', 'rawOcr', 'confidence']) {
     const t = trace(sha(0)); delete t.items[0].candidates[0].fieldCrops[0][key];
     const r = validateTraceEvidence(t); assert.equal(r.valid, false); assert.ok(r.missing.some(x => x.includes(key)));
@@ -157,6 +168,17 @@ test('trace requires candidate SHA and every crop evidence component with strict
   assert.equal(validateTraceEvidence({ items: [] }).valid, false);
   t.items[0].candidates[0].fieldCrops = [];
   assert.equal(validateTraceEvidence(t).valid, false);
+});
+
+test('no-candidate diagnostic trace is valid review evidence, but a silent empty trace is not', () => {
+  const sourceSha256 = sha('no-candidate');
+  const reviewTrace = { items: [{
+    source: { sha256: sourceSha256 }, candidates: [],
+    warnings: ['พบ candidate 0 รายการ; ต้องตรวจภาพด้วยตนเอง'],
+    diagnosticCounts: { ocrAttempts: 1 },
+  }] };
+  assert.equal(validateTraceEvidence(reviewTrace).valid, true);
+  assert.equal(validateTraceEvidence({ items: [{ source: { sha256: sourceSha256 }, candidates: [] }] }).valid, false);
 });
 
 test('review_required is preserved from checkpoint, separate reviewStatus and trace', async () => {

@@ -15,7 +15,10 @@ try {
   # Validate the complete layout before starting even the first browser batch.
   $ranges = & node --input-type=module -e "import { parseBatchSpec } from './scripts/run-batch500-resumable.mjs'; console.log(JSON.stringify(parseBatchSpec(process.argv[1])));" $BatchSpec
   if ($LASTEXITCODE -ne 0) { throw 'Invalid batch layout' }
-  $batches = @($ranges | ConvertFrom-Json)
+  # Windows PowerShell 5 can return the complete JSON array as one pipeline
+  # object. Write-Output explicitly enumerates it so `-BatchId 001` produces
+  # one record rather than one nested array whose .batchId expands to all IDs.
+  $batches = @($ranges | ConvertFrom-Json | Write-Output)
   if ($BatchId) { $batches = @($batches | Where-Object { $_.batchId -eq $BatchId }) }
   if ($batches.Count -eq 0) { throw 'Unknown batch ID' }
   $expectedBuild = (Get-Content -LiteralPath (Join-Path $BuildDir 'BUILD_ID') -Raw).Trim()
@@ -31,7 +34,10 @@ try {
     $html = $http.Content.Replace('\"', '"')
     $runtimeBuilds = @([regex]::Matches($html, '"b":"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
     if ($runtimeBuilds -notcontains $expectedBuild) { throw 'HTTP build ID mismatch or unavailable' }
-    $nodeArgs = @('scripts/run-batch500-resumable.mjs', '--base-url', $BaseUrl, '--fixture-roots', $FixtureRoots, '--out-dir', $OutDir, '--build-dir', $BuildDir, '--batch-spec', $BatchSpec, '--batch-id', $batch.batchId)
+    $nodeArgs = @('scripts/run-batch500-resumable.mjs', '--base-url', $BaseUrl, '--out-dir', $OutDir, '--build-dir', $BuildDir, '--batch-spec', $BatchSpec, '--batch-id', $batch.batchId)
+    # Do not round-trip the default Thai folder names through Windows
+    # PowerShell's native-argument encoding. Node owns the same UTF-8 default.
+    if ($PSBoundParameters.ContainsKey('FixtureRoots')) { $nodeArgs += @('--fixture-roots', $FixtureRoots) }
     if ($Resume) { $nodeArgs += '--resume' }
     & node @nodeArgs
     if ($LASTEXITCODE -ne 0) { throw "Batch $($batch.batchId) stopped; evidence retained at $OutDir" }

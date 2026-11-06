@@ -181,3 +181,13 @@ test("runner finalization never marks failed gates or processing errors complete
   assert.equal(optionalPreview.processingStatus, "completed");
   assert.equal(optionalPreview.status, "review_required");
 });
+
+test("runner preserves a diagnostic no-candidate outcome as review_required", () => {
+  const result = {
+    status: "review_required", tracePath: "C:/evidence/trace.json", pageErrors: [],
+    assertions: { traceCandidates: 0, fieldAudit: { passed: false }, reviewDerivedPreviewVisible: true },
+  };
+  contract.finalizeBatchResult(result);
+  assert.equal(result.processingStatus, "completed");
+  assert.equal(result.status, "review_required");
+});

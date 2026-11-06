@@ -7,12 +7,13 @@ import { parseArgs } from 'node:util';
 import { createBatchRunManifest, writeAtomicJson, readCheckpoint, isCheckpointCompatible, getPendingFixtures } from './batch500-contract.mjs';
 
 export const DEFAULT_BATCH_SPEC = '001:0:10,002:10:50,003:60:100,004:160:100,005:260:100,006:360:100,007:460:40';
+export const REPRESENTATIVE_100_BATCH_SPEC = '001:0:10,002:10:50,003:60:40';
 const DEFAULT_ROOTS = 'For Test/แชทที่ 1;For Test/แชทที่ 2;For Test/แชทที่ 3;For Test/Done';
 const PROCESSING_VERSION = 'batch-local-e2e.v1';
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 
-export function parseBatchSpec(spec = DEFAULT_BATCH_SPEC) {
+export function parseBatchSpec(spec = DEFAULT_BATCH_SPEC, expectedTotal = 500) {
   let end = 0;
   const ids = new Set();
   const batches = spec.split(',').map(part => {
@@ -24,11 +25,11 @@ export function parseBatchSpec(spec = DEFAULT_BATCH_SPEC) {
     end = offset + limit;
     return { batchId, offset, limit };
   });
-  if (end !== 500) throw new Error('Batch layout must cover exactly 500 images');
+  if (end !== expectedTotal) throw new Error(`Batch layout must cover exactly ${expectedTotal} images`);
   return batches;
 }
 
-export async function buildInventory(roots) {
+export async function buildInventory(roots, expectedTotal = 500) {
   const paths = new Set();
   // Match the existing runner: approved roots, direct image files only.
   for (const root of roots) {
@@ -37,9 +38,9 @@ export async function buildInventory(roots) {
       if (entry.isFile() && /\.(png|jpe?g)$/i.test(entry.name)) paths.add(await fs.realpath(path.join(absolute, entry.name)));
     }
   }
-  if (paths.size < 500) throw new Error(`Require exactly 500 image records; found only ${paths.size}`);
+  if (paths.size < expectedTotal) throw new Error(`Require at least ${expectedTotal} image records; found only ${paths.size}`);
   const inventory = [];
-  for (const fixturePath of [...paths].sort(compare).slice(0, 500)) {
+  for (const fixturePath of [...paths].sort(compare).slice(0, expectedTotal)) {
     const stat = await fs.stat(fixturePath);
     inventory.push({ fixturePath, size: stat.size, modifiedTime: stat.mtime.toISOString(), sourceSha256: sha(await fs.readFile(fixturePath)) });
   }
@@ -173,19 +174,22 @@ async function main() {
     'base-url': { type: 'string', default: 'http://127.0.0.1:3450/' },
     'fixture-roots': { type: 'string', default: DEFAULT_ROOTS },
     'out-dir': { type: 'string' }, 'build-dir': { type: 'string', default: 'build-output-enterprise' },
-    'batch-spec': { type: 'string', default: DEFAULT_BATCH_SPEC }, resume: { type: 'boolean', default: false },
+    'batch-spec': { type: 'string' }, 'inventory-limit': { type: 'string', default: '500' }, resume: { type: 'boolean', default: false },
     'batch-id': { type: 'string' },
   } });
+  const inventoryLimit = Number(values['inventory-limit']);
+  if (!Number.isSafeInteger(inventoryLimit) || inventoryLimit <= 0) throw new Error('inventory-limit must be a positive integer');
   const roots = values['fixture-roots'].split(';').filter(Boolean).map(p => path.resolve(p));
   const buildDir = path.resolve(values['build-dir']);
-  const batches = parseBatchSpec(values['batch-spec']);
+  const batchSpec = values['batch-spec'] || (inventoryLimit === 100 ? REPRESENTATIVE_100_BATCH_SPEC : DEFAULT_BATCH_SPEC);
+  const batches = parseBatchSpec(batchSpec, inventoryLimit);
   const selected = values['batch-id'] ? batches.filter(b => b.batchId === values['batch-id']) : batches;
   if (!selected.length) throw new Error('Unknown batch ID');
-  const inventory = await buildInventory(roots);
+  const inventory = await buildInventory(roots, inventoryLimit);
   const buildId = await checkRuntime(values['base-url'], buildDir);
   const gitCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   if (values.resume && !values['out-dir']) throw new Error('--resume requires --out-dir');
-  const runDir = path.resolve(values['out-dir'] || path.join('For Test Results', `batch500-resumable-${randomUUID()}`));
+  const runDir = path.resolve(values['out-dir'] || path.join('For Test Results', `batch${inventoryLimit}-resumable-${randomUUID()}`));
   const manifestPath = path.join(runDir, 'manifest.json');
   let manifest = createBatchRunManifest({ runId: path.basename(runDir), buildId, gitCommit, processingVersion: PROCESSING_VERSION, inventory, batches });
   if (values.resume) {

@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { createBatchRunManifest, writeAtomicJson } from '../batch500-contract.mjs';
-import { DEFAULT_BATCH_SPEC, parseBatchSpec, buildInventory, runBatch } from '../run-batch500-resumable.mjs';
+import { DEFAULT_BATCH_SPEC, REPRESENTATIVE_100_BATCH_SPEC, parseBatchSpec, buildInventory, runBatch } from '../run-batch500-resumable.mjs';
 
 // Retain test evidence; never remove fixtures or previous run directories.
 async function setup(count = 3) {
@@ -36,9 +36,15 @@ test('exact seven ranges cover 500 positions with no overlap or gap', () => {
   assert.deepEqual(ranges.flatMap(r => Array.from({ length: r.limit }, (_, i) => r.offset + i)), Array.from({ length: 500 }, (_, i) => i));
   for (const spec of ['001:0:10,002:9:491', '001:1:499', '001:0:499', '001:0:250,001:250:250']) assert.throws(() => parseBatchSpec(spec));
 });
+test('representative 100 layout is contiguous and cannot silently run a different count', () => {
+  const ranges = parseBatchSpec(REPRESENTATIVE_100_BATCH_SPEC, 100);
+  assert.deepEqual(ranges.map(r => r.limit), [10, 50, 40]);
+  assert.deepEqual(ranges.flatMap(r => Array.from({ length: r.limit }, (_, i) => r.offset + i)), Array.from({ length: 100 }, (_, i) => i));
+  assert.throws(() => parseBatchSpec(REPRESENTATIVE_100_BATCH_SPEC, 500), /500/);
+});
 test('inventory is deterministic, absolute, hashed, capped at 500 and rejects fewer', async () => {
   const { dir } = await setup(2);
-  await assert.rejects(buildInventory([dir]), /exactly 500/);
+  await assert.rejects(buildInventory([dir]), /500/);
   for (let i = 2; i < 500; i++) await fs.writeFile(path.join(dir, `${i}.png`), `image-${i}`);
   const items = await buildInventory([dir]);
   assert.equal(items.length, 500);

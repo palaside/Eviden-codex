@@ -111,8 +111,12 @@ export function isCheckpointCompatible(checkpoint, manifest) {
 // Shared by the browser runner and checkpoint regression: successful processing
 // is independent of whether the evidence still requires human review.
 export function finalizeBatchResult(result, { requireReviewDerivedPreview = true } = {}) {
+  const hasNoCandidateReview = result?.status === "review_required"
+    && Number(result?.assertions?.traceCandidates) === 0
+    && typeof result?.tracePath === "string" && result.tracePath.length > 0;
+  const failedFieldAudit = result?.assertions?.fieldAudit?.passed !== true && !hasNoCandidateReview;
   const failed = Boolean(result.error || result.externalProviderCall || result.pageErrors?.length
-    || result.assertions?.fieldAudit?.passed !== true
+    || failedFieldAudit
     || (requireReviewDerivedPreview && result.assertions?.reviewDerivedPreviewVisible === false));
   result.processingStatus = failed ? "failed" : "completed";
   if (failed) result.status = "failed";

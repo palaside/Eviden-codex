@@ -45,7 +45,11 @@
     ".next-task5-38774-final/types/**/*.ts",
     ".next-task5-38774-final/dev/types/**/*.ts",
     ".next-task5-38773-final/types/**/*.ts",
-    ".next-task5-38773-final/dev/types/**/*.ts"
+    ".next-task5-38773-final/dev/types/**/*.ts",
+    "build-output-batch-status-staging/types/**/*.ts",
+    "build-output-batch-status-staging/dev/types/**/*.ts",
+    "build-output-representative100-staging/types/**/*.ts",
+    "build-output-representative100-staging/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

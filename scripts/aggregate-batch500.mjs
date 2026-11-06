@@ -28,7 +28,15 @@ export function validateTraceEvidence(trace) {
     const prefix = `items[${i}]`;
     if (!SHA256.test(sourceSha(item) || '')) missing.push(`${prefix}.sourceSha256`);
     if (!Array.isArray(item?.candidates) || !item.candidates.length) {
-      missing.push(`${prefix}.candidates: empty or missing`); return;
+      // No candidate is an explicit review outcome, not a false assertion that
+      // a slip was detected. A trace with diagnostics/warnings is therefore
+      // valid evidence for review_required, while a silent empty trace is not.
+      const hasDiagnostic = Number(item?.diagnosticCounts?.ocrAttempts || 0) > 0
+        || Array.isArray(item?.ocrDiagnosticTrace?.attempts);
+      const requiresReview = Array.isArray(item?.warnings)
+        && item.warnings.some((warning) => /candidate|ตรวจภาพ|QR\/OCR/u.test(String(warning)));
+      if (!hasDiagnostic || !requiresReview) missing.push(`${prefix}.candidates: empty without diagnostic review evidence`);
+      return;
     }
     item.candidates.forEach((candidate, j) => {
       const location = `${prefix}.candidates[${j}]`;
@@ -41,8 +49,10 @@ export function validateTraceEvidence(trace) {
         const fieldPath = `${location}.fieldCrops[${k}]`;
         if (!SHA256.test(field?.cropSha256 || '')) missing.push(`${fieldPath}.cropSha256`);
         if (!validBounds(field?.bounds)) missing.push(`${fieldPath}.bounds`);
-        // Empty OCR and zero confidence are legitimate retained evidence.
-        if (typeof field?.rawOcr !== 'string') missing.push(`${fieldPath}.rawOcr`);
+        // Empty OCR and zero confidence are legitimate retained evidence. The
+        // UI records an unrecognised field as null (rather than inventing an
+        // empty string), so require the key but accept string or null.
+        if (!(typeof field?.rawOcr === 'string' || field?.rawOcr === null)) missing.push(`${fieldPath}.rawOcr`);
         if (typeof field?.confidence !== 'number' || !Number.isFinite(field.confidence) || field.confidence < 0 || field.confidence > 1) missing.push(`${fieldPath}.confidence`);
       });
     });
@@ -60,7 +70,7 @@ function groupBy(values, key) {
   return groups;
 }
 
-export async function aggregateBatchReports({ runDir, expectedInventoryPath }) {
+export async function aggregateBatchReports({ runDir, expectedInventoryPath, expectedCount = 500 }) {
   runDir = path.resolve(runDir);
   expectedInventoryPath = path.resolve(expectedInventoryPath);
   const manifest = await readJson(path.join(runDir, 'manifest.json'));
@@ -68,7 +78,7 @@ export async function aggregateBatchReports({ runDir, expectedInventoryPath }) {
   const inventory = Array.isArray(expected) ? expected : expected.inventory;
   if (!Array.isArray(inventory)) throw new TypeError('expected inventory must be an array or contain inventory');
   const issues = [];
-  if (inventory.length !== 500) issues.push(`Require exactly 500 source inventory records; found ${inventory.length}`);
+  if (inventory.length !== expectedCount) issues.push(`Require exactly ${expectedCount} source inventory records; found ${inventory.length}`);
   if (JSON.stringify(inventory) !== JSON.stringify(manifest.inventory)) issues.push('expected inventory differs from run manifest');
   let checkpoint;
   try { checkpoint = await readJson(path.join(runDir, 'checkpoint.json')); }
@@ -210,13 +220,13 @@ export async function aggregateBatchReports({ runDir, expectedInventoryPath }) {
     else missingRanges.push({ startIndex: record.inventoryIndex, endIndex: record.inventoryIndex, count: 1 });
   }
   const counts = Object.fromEntries(STATUSES.map(status => [status, records.filter(r => r.status === status).length]));
-  const incomplete = inventory.length !== 500 || missingRecords.length > 0;
+  const incomplete = inventory.length !== expectedCount || missingRecords.length > 0;
   const invalid = issues.length > 0 || traceIntegrity.some(r => !r.valid) || duplicateProcessing.length > 0 || unexpectedResults.length > 0 || counts.failed > 0;
   const status = incomplete ? 'incomplete' : invalid ? 'failed' : counts.review_required > 0 ? 'review_required' : 'passed';
   // A fresh directory and exclusive writes preserve every prior report.
   const outputDir = path.join(runDir, `aggregate-${randomUUID()}`);
   await fs.mkdir(outputDir);
-  const common = { schema: 'digital-evidence.batch500-aggregate.v1', runDir, expectedInventoryPath,
+  const common = { schema: 'digital-evidence.batch-aggregate.v1', runDir, expectedInventoryPath, expectedCount,
     runIdentity: manifest.runIdentity ?? null, gitCommit: manifest.gitCommit ?? null,
     generatedAt: aggregatedAt, checkpointUpdatedAt: checkpoint.updatedAt ?? null, status, inventoryCount: inventory.length, counts, issues, records };
   const report = { ...common, outputDir, missingRanges, missingRecords, duplicateSources, duplicateProcessing, unexpectedResults, traceIntegrity };
@@ -230,8 +240,10 @@ export async function aggregateBatchReports({ runDir, expectedInventoryPath }) {
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  const { values } = parseArgs({ options: { 'run-dir': { type: 'string' }, 'expected-inventory': { type: 'string' } } });
+  const { values } = parseArgs({ options: { 'run-dir': { type: 'string' }, 'expected-inventory': { type: 'string' }, 'expected-count': { type: 'string', default: '500' } } });
   if (!values['run-dir'] || !values['expected-inventory']) throw new Error('Require --run-dir and --expected-inventory');
-  const report = await aggregateBatchReports({ runDir: values['run-dir'], expectedInventoryPath: values['expected-inventory'] });
+  const expectedCount = Number(values['expected-count']);
+  if (!Number.isSafeInteger(expectedCount) || expectedCount <= 0) throw new Error('expected-count must be a positive integer');
+  const report = await aggregateBatchReports({ runDir: values['run-dir'], expectedInventoryPath: values['expected-inventory'], expectedCount });
   console.log(JSON.stringify({ status: report.status, counts: report.counts, outputDir: report.outputDir }));
 }
