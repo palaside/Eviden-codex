@@ -1,5 +1,6 @@
 import {createOcrAdapter} from './ocr-adapter-core.mjs';
-import {GeminiOcrError,validateGeminiOcrDocument} from './gemini-ocr-contract.mjs';
+import {GeminiOcrError} from './gemini-ocr-contract.mjs';
+import {validateGeminiReviewOutput,GEMINI_REVIEW_FORMAT} from './gemini-ocr-assessment.mjs';
 import {segmentOcrTextLines} from './two-layer-segmentation.mjs';
 import {findChatEventTimestamp} from './chat-capture-metadata.mjs';
 
@@ -12,7 +13,7 @@ function cropCanvas(canvas,bounds){
   context.drawImage(canvas,bounds.x,bounds.y,bounds.width,bounds.height,0,0,crop.width,crop.height);
   return crop.toDataURL('image/png');
 }
-export function createGeminiOcrAdapter({transcribeImage,consent=false,cropImage=cropCanvas,id='gemini-3.1-pro',providerLabel='Gemini',validateOutput=validateGeminiOcrDocument}={}) {
+export function createGeminiOcrAdapter({transcribeImage,consent=false,cropImage=cropCanvas,id='gemini-3.1-pro',providerLabel='Gemini',validateOutput=validateGeminiReviewOutput}={}) {
   const cache=new WeakMap();
   const ensureConfigured=()=>{
     if(typeof transcribeImage!=='function')throw new GeminiOcrError('OCR_ADAPTER_NOT_CONFIGURED','Gemini adapter needs a server-side transport bridge');
@@ -43,9 +44,10 @@ export function createGeminiOcrAdapter({transcribeImage,consent=false,cropImage=
           lines:response.pageLines.map((line,index)=>({id:`gemini-line-${index}`,text:line.text,confidence:line.confidence*100,bounds:line.bounds}))}],
         regions:slips.map(s=>({bounds:s.bounds,amount:s.data.transaction.amount,senderName:s.data.sender.name,receiverName:s.data.receiver.name,
           reference:s.data.transaction.reference_no,visualCropEvidence:!mapped,acceptedByCandidatePolicy:!mapped,reason:mapped?'Input image extent only; not a detected slip boundary or verified field region':`${providerLabel} transcription candidate; human review required`})),
-        parserRejectionReasons:mapped?response.warnings:[],imageArtifacts:[]};
+        parserRejectionReasons:mapped?response.warnings:(response.issues||[]).map(issue=>`${issue.path}: ${issue.reason}`),imageArtifacts:[],
+        ...(response.format===GEMINI_REVIEW_FORMAT?{geminiReview:response}:{})};
       const candidates=await Promise.all(slips.map(async slip=>({data:{...slip.data,warnings:[...slip.data.warnings,`${mapped?response.provider:providerLabel} ${mapped?'heuristic mapping':'exact-transcription candidate'} — review_required; confidence is not proof of correctness`]},
-        bounds:slip.bounds,cropDataUrl:await cropImage(canvas,slip.bounds),ocrTextBoxes:slip.ocrTextBoxes,ocrDiagnosticTrace:trace})));
+        bounds:slip.bounds,cropDataUrl:await cropImage(canvas,slip.bounds),ocrTextBoxes:slip.ocrTextBoxes,ocrDiagnosticTrace:{...trace,...(response.format===GEMINI_REVIEW_FORMAT?{geminiSourceIndex:slip.sourceIndex}:{})}})));
       const allLines=[...response.pageLines,...slips.flatMap(s=>s.ocrTextBoxes)];
       const unique=[...new Map(allLines.map(line=>[JSON.stringify([line.text,line.bounds]),line])).values()];
       cache.set(canvas,{...segmentOcrTextLines(unique,size),warnings:[`${providerLabel} OCR requires human review`],maskCoverage:null,colorMaskCoverage:null,ocrDiagnosticTrace:trace});

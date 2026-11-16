@@ -1,7 +1,7 @@
 # Gemini OCR: แยกผลดิบออกจากผลตรวจราย field
 
 วันที่: 2026-11-17
-สถานะ: ผู้ใช้อนุมัติแนวทางแล้ว รอรีวิวเอกสารก่อนทำ implementation plan
+สถานะ: ผู้ใช้ยืนยันการรีวิว 2026-11-17; ผ่านการตรวจความสอดคล้องเพื่อทำ implementation plan ไม่ใช่หลักฐานว่า implementation ผ่าน
 
 ## เป้าหมาย
 
@@ -100,3 +100,11 @@ Build โฟลเดอร์ Staging ใหม่ ตรวจ process ก่�
 
 ตรวจแล้ว: ไม่มี placeholder implementation, แยก supported ออกจาก unverified, ไม่อนุญาตพิกัดปลอม, ไม่ bypass review gate, ระบุสองเส้นทาง Gemini และไม่แก้ persistence schema
 จุดที่ต้องพิสูจน์ในขั้น implementation คือ consumer ที่คำนวณยอดและความสามารถแสดง proposal ผ่านพื้นที่ review เดิม ไม่ถือว่าสำเร็จจากเอกสารนี้
+
+## ข้อค้นพบระหว่างรีวิวโค้ดประกอบ spec
+
+1. fetchGeminiDetectionBridge ปัจจุบันส่งต่อเฉพาะ bbox_1000, visual_cues และ data ทำให้ ocrTextBoxes/assessment ไม่ถึงปุ่ม Gemini รายไฟล์ ต้องส่งหลักฐานต่อให้ครบและผูกกับ candidate เดียวกัน
+2. scanSelectedSlipWithAi สร้าง field crop จาก template และใช้ raw_text ทั้งใบกับแต่ละ field; template_region_only ไม่ใช่หลักฐานว่าโมเดลอ่าน field นั้นจาก crop จึงห้ามยกระดับเป็น region_quality pass โดยอัตโนมัติ
+3. ค่ารอตรวจที่พิกัดไม่ผ่านจะอยู่เฉพาะ assessment/proposal ไม่เขียนทับ canonical data ที่ ledger/export ใช้ ค่าที่มีหลักฐานผ่านยังเป็นข้อเสนอจนมนุษย์ยืนยัน
+4. ผลดิบที่ไม่มีกรอบสลิปถูกต้องต้องแสดงระดับภาพ/trace ห้ามสร้าง bounding box ทั้งภาพเพื่อให้ได้ candidate
+5. metadata สำหรับ partial review ต้องอยู่ใน trace/พื้นที่ review เดิมโดยไม่เปลี่ยน IndexedDB schema ถ้า reload ไม่รักษา metadata นี้ ต้องรายงานเป็นข้อจำกัด และไม่รายงาน reload ผ่านทั้งหมด

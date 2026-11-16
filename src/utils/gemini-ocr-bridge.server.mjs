@@ -6,7 +6,17 @@ export function createGeminiBridgeHandler({transcribeImage} = {}) {
     try {
       // This browser bridge accepts only same-origin requests, never cross-origin uploads.
       const origin=request.headers.get('origin');
-      if (origin && origin !== new URL(request.url).origin) return failure('GEMINI_BRIDGE_ORIGIN','Cross-origin upload rejected',403);
+      const requestUrl=new URL(request.url);
+      // Next can normalize 127.0.0.1 to localhost internally. Accept only the
+      // actual loopback Host at the same protocol and port, never forwarded hosts.
+      const host=request.headers.get('host');
+      const loopback=['localhost','127.0.0.1','[::1]'];
+      let loopbackOrigin;
+      if(host && loopback.includes(requestUrl.hostname)){
+        const publicUrl=new URL(`${requestUrl.protocol}//${host}`);
+        if(loopback.includes(publicUrl.hostname) && publicUrl.port===requestUrl.port && publicUrl.host===host)loopbackOrigin=publicUrl.origin;
+      }
+      if (origin && origin !== requestUrl.origin && origin !== loopbackOrigin) return failure('GEMINI_BRIDGE_ORIGIN','Cross-origin upload rejected',403);
       const apiKey=request.headers.get('x-api-key')?.trim();
       if(!apiKey)return failure('GEMINI_NOT_CONFIGURED','โปรดกรอก API Key ก่อนสกัดรายละเอียด',401);
       if(apiKey.length>4096 || !/^[\x21-\x7E]+$/.test(apiKey))return failure('GEMINI_INVALID_API_KEY','รูปแบบ API Key ไม่ถูกต้อง',400);

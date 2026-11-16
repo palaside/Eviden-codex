@@ -21,7 +21,7 @@ export default function OcrProviderControls({disabled=false}:{disabled?:boolean}
     try{saveProviderSettings(settings);closeVault();}catch{setError('บันทึก API Vault ไม่สำเร็จ กรุณาตรวจสิทธิ์ localStorage');}
   }
   return <>
-    <label className="flex min-w-0 items-center gap-1">
+    <label className="flex shrink-0 items-center gap-1 whitespace-nowrap">
       <span>OCR</span>
       <select aria-label="โมเดล OCR" value={model} disabled={disabled}
         onChange={event=>{selectOcrModel(event.target.value);setModel(event.target.value);}}
@@ -29,7 +29,7 @@ export default function OcrProviderControls({disabled=false}:{disabled?:boolean}
         {OCR_MODELS.map(option=><option key={option.id} value={option.id}>{option.label}</option>)}
       </select>
     </label>
-    <button type="button" onClick={openVault} className="rounded border border-sky-400/30 bg-sky-500/10 px-3 py-1 text-xs text-sky-200 hover:bg-sky-500/20 focus-visible:outline-2 focus-visible:outline-sky-400">🔑 จัดการ API Key</button>
+    <button type="button" onClick={openVault} className="shrink-0 whitespace-nowrap rounded border border-sky-400/30 bg-sky-500/10 px-3 py-1 text-xs text-sky-200 hover:bg-sky-500/20 focus-visible:outline-2 focus-visible:outline-sky-400">🔑 จัดการ API Key</button>
     <dialog ref={dialog} aria-labelledby="ocr-vault-title" onCancel={event=>{event.preventDefault();closeVault();}}
       onClick={event=>{if(event.target===dialog.current)closeVault();}}
       className="fixed inset-0 m-auto max-h-[90vh] w-[calc(100%_-_2rem)] max-w-2xl overflow-y-auto rounded-2xl border border-sky-400/30 bg-slate-950/95 p-0 text-slate-100 shadow-2xl shadow-sky-950/50 backdrop-blur-xl backdrop:bg-black/70 backdrop:backdrop-blur-sm">
@@ -41,7 +41,7 @@ export default function OcrProviderControls({disabled=false}:{disabled?:boolean}
         {OCR_MODELS.map(option=><fieldset key={option.id} className="space-y-3 rounded-xl border border-white/10 bg-white/[0.03] p-4">
           <legend className="px-2 text-sm font-semibold text-sky-200">{option.label}</legend>
           <label className="block text-sm">API Key<input type="password" autoComplete="off" spellCheck={false} aria-label={`${option.label} API Key`}
-            value={settings[option.id].apiKey} placeholder={option.id==='gemini'?'AIza...':option.id==='typhoon'?'sk-...':'คีย์ของ Provider หรือ hf_...'}
+            value={settings[option.id].apiKey} placeholder="วาง API Key ตัวเต็มจากผู้ให้บริการ (ไม่จำกัด prefix)"
             onChange={event=>setSettings(previous=>({...previous,[option.id]:{...previous[option.id],apiKey:event.target.value}}))}
             className="mt-1 w-full rounded-lg border border-white/15 bg-black/30 px-3 py-2 font-mono text-sm focus:border-sky-400 focus:outline-none"/></label>
           {option.id.startsWith('openthai')&&<label className="block text-sm">Provider<select aria-label={`${option.label} Provider`} value={settings[option.id].provider}

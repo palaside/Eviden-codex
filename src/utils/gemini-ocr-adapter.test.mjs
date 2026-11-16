@@ -39,7 +39,10 @@ test('rejects field values that omit a prefix or mask preserved in single-field 
   for(const [line,value] of [['น.ส. จิณห์...','จิณห์...'],['น.ส. จิณห์... s***','น.ส. จิณห์...']]){
     const document=responseDocument();document.slips[0].ocrTextBoxes[0].text=line;document.slips[0].data.raw_text[0]=line;document.slips[0].data.receiver.name=value;
     const result=await createGeminiImageTransport({apiKey:'test',fetchImpl:async()=>apiResponse(document)})(png(),context);
-    assert.equal(result.ok,false);assert.equal(result.error.code,'GEMINI_UNSUPPORTED_FIELD');
+    assert.equal(result.ok,true);
+    assert.equal(result.value.slips[0].data.receiver.name,null);
+    assert.equal(result.value.slipAssessments[0].fieldAssessments.receiver_name.status,'unverified');
+    assert.equal(result.value.slips[0].data.transaction.amount,7200);
   }
 });
 
@@ -85,14 +88,26 @@ for(const [name,make,code] of [
   ['invalid JSON',()=>new Response(JSON.stringify({candidates:[{finishReason:'STOP',content:{parts:[{text:'not-json'}]}}]})),'GEMINI_INVALID_JSON'],
   ['truncated output',()=>apiResponse(responseDocument(),{finishReason:'MAX_TOKENS'}),'GEMINI_INCOMPLETE_RESPONSE'],
   ['blocked output',()=>new Response(JSON.stringify({promptFeedback:{blockReason:'SAFETY'}})),'GEMINI_BLOCKED'],
-  ['invalid bounds',()=>{const d=responseDocument();d.slips[0].bounds.width=1000;return apiResponse(d);},'GEMINI_SCHEMA_MISMATCH'],
-  ['missing field',()=>{const d=responseDocument();delete d.slips[0].data.sender;return apiResponse(d);},'GEMINI_SCHEMA_MISMATCH'],
-  ['invented name absent from evidence',()=>{const d=responseDocument();d.slips[0].data.receiver.name='ชื่อที่ไม่มีในภาพ';return apiResponse(d);},'GEMINI_UNSUPPORTED_FIELD'],
-  ['invalid confidence',()=>{const d=responseDocument();d.pageLines[0].confidence=9;return apiResponse(d);},'GEMINI_SCHEMA_MISMATCH'],
 ])test(`rejects ${name} rather than returning successful empty extraction`,async()=>{
   const {createGeminiImageTransport}=await api();
   const result=await createGeminiImageTransport({apiKey:'test',fetchImpl:async()=>make()})(png(),context);
   assert.equal(result.ok,false);assert.equal(result.error.code,code);
+});
+
+test('transport preserves partial review without accepting invalid bounds, names or confidence',async()=>{
+  const {createGeminiImageTransport}=await api();
+  const document=responseDocument();
+  document.slips.push(structuredClone(document.slips[0]));document.slips[1].bounds.width=1000;
+  document.slips[0].data.receiver.name='ชื่อที่ไม่มีในภาพ';delete document.slips[0].data.sender;
+  document.pageLines[0].confidence=9;
+  const result=await createGeminiImageTransport({apiKey:'test',fetchImpl:async()=>apiResponse(document)})(png(),context);
+  assert.equal(result.ok,true);assert.equal(result.value.slips.length,1);
+  assert.equal(result.value.slips[0].data.transaction.amount,7200);
+  assert.equal(result.value.slips[0].data.receiver.name,null);
+  assert.equal(result.value.slips[0].data.sender.name,null);
+  assert.equal(result.value.pageLines.length,0);
+  assert.equal(result.value.slipAssessments[1].candidate,null);
+  assert.equal(result.value.reviewStatus,'review_required');
 });
 
 test('does not transmit without consent or with unsupported image',async()=>{

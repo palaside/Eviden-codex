@@ -38,12 +38,13 @@ test('missing browser key stops before reading image or making a request',async(
 test('exact transcription explicitly forbids guessing, deleting stars and expanding abbreviations',()=>{
   assert.match(EXACT_TRANSCRIPTION_PROMPT,/ห้ามเดา/);assert.match(EXACT_TRANSCRIPTION_PROMPT,/ห้ามลบดอกจัน/);assert.match(EXACT_TRANSCRIPTION_PROMPT,/ห้ามลบหรือขยายตัวย่อ/);
 });
-test('client header key reaches Google header and never response',async()=>{
+for (const apiKey of ['AIza-test-key','AQ.test-key','other-provider-issued-key']) test(`client key format ${apiKey.split('-')[0]} reaches Google unchanged`,async()=>{
   const original=globalThis.fetch;let calls=0;
-  globalThis.fetch=async(_url,options)=>{calls++;assert.equal(options.headers['x-goog-api-key'],'client-key-test');return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:'{"slips":[],"pageLines":[]}'}]}}]});};
+  globalThis.fetch=async(_url,options)=>{calls++;assert.equal(options.headers['x-goog-api-key'],apiKey);return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:'{"slips":[],"pageLines":[]}'}]}}]});};
   try{
     const body=new FormData();body.set('image',new Blob([new Uint8Array([137,80,78,71,13,10,26,10])],{type:'image/png'}),'slip.png');body.set('width','100');body.set('height','200');
-    const response=await createGeminiBridgeHandler()(new Request('http://localhost:3450/api/ocr/gemini',{method:'POST',headers:{'x-api-key':'client-key-test'},body}));
-    assert.equal(response.status,200);assert.equal(calls,1);assert.doesNotMatch(await response.text(),/client-key-test/);
+    const client=createGeminiBridgeClient({getApiKey:()=>apiKey,fetchImpl:async(_url,options)=>createGeminiBridgeHandler()(new Request('http://localhost:3450/api/ocr/gemini',options))});
+    const result=await client(body.get('image'),{width:100,height:200});
+    assert.equal(result.ok,true);assert.equal(calls,1);assert.equal(JSON.stringify(result).includes(apiKey),false);
   }finally{globalThis.fetch=original;}
 });

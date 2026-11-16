@@ -1,5 +1,6 @@
 import {SlipExtractionSchema} from '../schemas/slip.schema.ts';
 import {validateGeminiOcrDocument} from './gemini-ocr-contract.mjs';
+import {validateGeminiReviewOutput,GEMINI_REVIEW_FORMAT} from './gemini-ocr-assessment.mjs';
 
 const FORMAT='digital-evidence.mapped-ocr.v1';
 const fail=(code,message)=>{const error=new Error(message);error.code=code;throw error;};
@@ -130,6 +131,7 @@ export function mapTyphoonOutput(envelope,context){
 }
 export function mapTyphoonCandidates(value,context){const mapped=mapTyphoonOutput(value,context);return mapped.candidates??mapped.slips.map(slip=>({...slip,cropDataUrl:''}));}
 export function validateMappedOrNormalizedOutput(value,context){
+  if(value?.format===GEMINI_REVIEW_FORMAT)return validateGeminiReviewOutput(value,context);
   if(value?.format!==FORMAT)return validateGeminiOcrDocument(value,context);
   if(!['typhoon','openthai-text','openthai-markdown'].includes(value.provider)||typeof value.rawText!=='string'||value.rawText.length>50000||value.sourceDimensions?.width!==context.width||value.sourceDimensions?.height!==context.height||!Array.isArray(value.candidates)||value.candidates.length>1||!Array.isArray(value.pageLines))fail('OCR_INVALID_MAPPING','Invalid mapper envelope');
   const validBounds=b=>b&&[b.x,b.y,b.width,b.height].every(Number.isFinite)&&b.x>=0&&b.y>=0&&b.width>0&&b.height>0&&b.x+b.width<=context.width&&b.y+b.height<=context.height;

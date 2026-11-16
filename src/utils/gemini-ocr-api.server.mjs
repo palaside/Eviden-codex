@@ -1,6 +1,7 @@
 // Server-only transport. Never import this module into a client component.
 import {Buffer} from 'node:buffer';
-import {GEMINI_OCR_MODEL,EXACT_TRANSCRIPTION_PROMPT,GEMINI_OCR_RESPONSE_SCHEMA,GeminiOcrError,validateGeminiOcrDocument} from './gemini-ocr-contract.mjs';
+import {GEMINI_OCR_MODEL,EXACT_TRANSCRIPTION_PROMPT,GEMINI_OCR_RESPONSE_SCHEMA,GeminiOcrError} from './gemini-ocr-contract.mjs';
+import {assessGeminiOcrDocument} from './gemini-ocr-assessment.mjs';
 
 export function createGeminiImageTransport({apiKey,fetchImpl=globalThis.fetch,timeoutMs=90000}={}) {
   return async function transcribeImage(image,context={}) {
@@ -28,9 +29,17 @@ export function createGeminiImageTransport({apiKey,fetchImpl=globalThis.fetch,ti
           // Gemini 3 guidance recommends its default temperature; 0 does not guarantee exact OCR.
           generationConfig:{responseMimeType:'application/json',responseSchema:GEMINI_OCR_RESPONSE_SCHEMA,maxOutputTokens:32768}}),
       });
-      if(!response.ok)throw new GeminiOcrError(response.status===429?'GEMINI_QUOTA_EXCEEDED':'GEMINI_HTTP_ERROR',
+      if(!response.ok){
+        // Diagnostic only: never log request headers, image payload or credentials.
+        const errorText=await response.text();
+        const safeText=errorText.split(apiKey).join('[REDACTED_KEY]')
+          .replace(/(?:AIza|AQ\.)[A-Za-z0-9_.-]+/g,'[REDACTED_KEY]')
+          .replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g,'[REDACTED_IMAGE]');
+        console.error('[Gemini Google error]',response.status,safeText.slice(0,12000));
+        throw new GeminiOcrError(response.status===429?'GEMINI_QUOTA_EXCEEDED':'GEMINI_HTTP_ERROR',
         response.status===429?'Gemini quota exceeded; request stopped without retry':'Gemini request failed',
         {status:response.status,retryable:response.status>=500});
+      }
       let envelope;
       try{envelope=await response.json();}catch{throw new GeminiOcrError('GEMINI_INVALID_JSON','Gemini returned an invalid response envelope');}
       if(envelope.promptFeedback?.blockReason)throw new GeminiOcrError('GEMINI_BLOCKED','Gemini blocked this request; no extraction returned');
@@ -39,8 +48,9 @@ export function createGeminiImageTransport({apiKey,fetchImpl=globalThis.fetch,ti
       const text=(candidate.content?.parts||[]).filter(part=>part.thought!==true&&typeof part.text==='string').map(part=>part.text).join('');
       let document;
       try{document=JSON.parse(text);}catch{throw new GeminiOcrError('GEMINI_INVALID_JSON','Gemini returned invalid OCR JSON');}
-      return {ok:true,value:validateGeminiOcrDocument(document,context)};
+      return {ok:true,value:assessGeminiOcrDocument(document,{...context,rawResponseText:text})};
     } catch(error) {
+      if(error instanceof GeminiOcrError && error.code==='GEMINI_SCHEMA_MISMATCH')console.error('[Gemini validation]',error.code,error.message);
       const safe=error instanceof GeminiOcrError?error
         :['AbortError','TimeoutError'].includes(error?.name)?new GeminiOcrError('GEMINI_TIMEOUT','Gemini request timed out; no automatic retry')
           :new GeminiOcrError('GEMINI_NETWORK_ERROR','Gemini transport failed; response was not accepted',{retryable:true});

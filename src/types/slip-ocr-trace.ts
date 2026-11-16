@@ -72,6 +72,8 @@ export interface SlipOcrContourAudit {
 }
 
 export interface SlipOcrDiagnosticTrace {
+  geminiSourceIndex?: number;
+  geminiReview?: GeminiReviewReport;
   schemaVersion?: "digital-evidence.slip-ocr-trace.v2";
   sourceDimensions: { width: number; height: number };
   objectBounds: SlipOcrTraceBounds[];
@@ -82,4 +84,18 @@ export interface SlipOcrDiagnosticTrace {
   regions: SlipOcrRegionTrace[];
   parserRejectionReasons: string[];
   imageArtifacts?: SlipImageArtifact[];
+}
+
+export interface GeminiReviewReport {
+  format: "digital-evidence.gemini-review.v1";
+  rawResponseText: string;
+  sourceDimensions: { width: number; height: number };
+  pageLines: Array<{text:string;confidence:number;bounds:SlipOcrTraceBounds}>;
+  slips: unknown[];
+  slipAssessments: Array<{sourceIndex:number;fieldAssessments:Record<string,{
+    value:unknown;status:"supported"|"unverified"|"conflict"|"unavailable";
+    sourcePath:string;bounds:SlipOcrTraceBounds[]|null;confidence:number;reason:string;
+  }>} >;
+  issues:Array<{path:string;reason:string}>;
+  reviewStatus:"review_required";
 }

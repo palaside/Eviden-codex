@@ -37,6 +37,9 @@ import { clearUnreproducedAiNames, findMatchingSlipRecord, getAiFilledFields, me
 import { extractSlipCandidatesWithLocalOcr, getCachedChatEvidenceLayers, readChatPreflight } from "@/utils/ocr-adapter";
 import { fetchGeminiDetectionBridge, subscribeGeminiBridgeErrors } from "@/utils/gemini-ocr-bridge-client.mjs";
 import OcrProviderControls from "@/components/OcrProviderControls";
+import GeminiReviewDetails from "@/components/GeminiReviewDetails";
+import {createGeminiReviewTrace,mergeGeminiReviewedCandidate} from "@/utils/gemini-ocr-assessment.mjs";
+import type {GeminiReviewReport} from "@/types/slip-ocr-trace";
 import { explainSlipOcrRegionRejection } from "@/utils/slip-ocr-trace.mjs";
 import { finalizeSlipCandidates } from "@/utils/finalize-slip-candidates.mjs";
 import { buildSlipExtractionStatus, buildSlipQrWarning } from "@/utils/slip-extraction-status.mjs";
@@ -652,6 +655,8 @@ export default function MasterEvidenceWorkspace() {
   const [selectedSlipRecordId, setSelectedSlipRecordId] = useState<string | null>(null);
   const [aiScanItemId, setAiScanItemId] = useState<string | null>(null);
   const [aiScanMessage, setAiScanMessage] = useState<string | null>(null);
+  const [aiReviewReport,setAiReviewReport]=useState<GeminiReviewReport|null>(null);
+  const visibleGeminiReview=aiReviewReport||stagedQueue[selectedItemIndex]?.ocrDiagnosticTrace?.geminiReview;
   const exactDuplicateGroups = useMemo(() => findExactFileDuplicateGroups(stagedQueue.map((item) => ({
     id: item.id,
     fileName: item.file.name,
@@ -1112,6 +1117,7 @@ export default function MasterEvidenceWorkspace() {
     if (!item || item.stitchedIntoItemId || (item.status !== "done" && item.status !== "error")) return;
     const engineLabel = engine === "slipvision" ? "SlipVision" : "Gemini";
     setAiScanItemId(itemId);
+    setAiReviewReport(null);
     setAiScanMessage(`กำลังสกัดจาก ${item.file.name} ด้วย ${engineLabel}; ผลจะรอตรวจทาน`);
     try {
       const body = new FormData();
@@ -1126,7 +1132,8 @@ export default function MasterEvidenceWorkspace() {
         message?: string;
         retryable?: boolean;
         provider_status?: number;
-        candidates?: Array<{ bbox_1000: [number, number, number, number]; visual_cues: string[]; data: SlipExtraction }>;
+        geminiReview?: GeminiReviewReport;
+        candidates?: Array<{ bbox_1000: [number, number, number, number]; visual_cues: string[]; data: SlipExtraction; sourceIndex?:number; ocrTextBoxes?: NonNullable<EmbeddedSlipRecord["ocrTextBoxes"]>; geminiReview?:GeminiReviewReport }>;
         metadata?: ExtractionMetadata;
       };
       if (!response.ok || !result.success || !result.metadata || !Array.isArray(result.candidates)) {
@@ -1136,6 +1143,8 @@ export default function MasterEvidenceWorkspace() {
       if (result.metadata.sha256 !== await computeFileSha256(item.file)) {
         throw new Error("SHA-256 ของภาพที่ API ประมวลผลไม่ตรงกับไฟล์ต้นฉบับ");
       }
+      if(result.geminiReview)setAiReviewReport(result.geminiReview);
+      setErrorMsg(null);
       const bitmap = await createImageBitmap(item.file);
       const sourceWidth = bitmap.width;
       const proposals = result.candidates.flatMap((candidate) => {
@@ -1150,6 +1159,8 @@ export default function MasterEvidenceWorkspace() {
         const template = selectSlipTemplate({ bankName: candidate.data.bank.name, rawText: candidate.data.raw_text });
         const fieldPlan = buildTemplateFieldPlan(template, { width: crop.width, height: crop.height });
         const fieldCrops: NonNullable<EmbeddedSlipRecord["fieldCrops"]> = Object.values(fieldPlan).map((field) => {
+          const evidenceKey=toCanonicalFieldName(field.field);
+          const supportingLines=candidate.ocrTextBoxes?.filter(line=>line.classification==='slip_evidence'&&line.supportsFields?.includes(evidenceKey==='date'||evidenceKey==='time'?'date_time':evidenceKey))||[];
           const fieldCanvas = document.createElement("canvas");
           fieldCanvas.width = field.bounds.width;
           fieldCanvas.height = field.bounds.height;
@@ -1158,7 +1169,7 @@ export default function MasterEvidenceWorkspace() {
           const quality = assessFieldQualityTyped({
             field: field.field,
             value: getCandidateFieldValue(candidate.data, toCanonicalFieldName(field.field)) ?? null,
-            rawOcr: candidate.data.raw_text?.join("\n") || null,
+            rawOcr: useGeminiBridge?(supportingLines.map(line=>line.text).join("\n")||null):(candidate.data.raw_text?.join("\n") || null),
             confidence: Number((candidate.data.confidence as Record<string, number | undefined>)?.[toCanonicalFieldName(field.field)] || 0),
             bounds: absoluteBounds,
             sourceDimensions: { width: sourceWidth, height: bitmap.height },
@@ -1177,13 +1188,16 @@ export default function MasterEvidenceWorkspace() {
             exact_candidate: quality.exact_candidate,
             certification_status: quality.certification_status,
             visual_quality: quality.visual_quality as "pass" | "review_required",
-            region_quality: quality.region_quality as "pass" | "fail" | "review_required",
+            region_quality: useGeminiBridge?"review_required":quality.region_quality as "pass" | "fail" | "review_required",
             recognition_quality: quality.recognition_quality as "pass" | "conflict" | "review_required",
             review_status: quality.review_status as "review_required",
             status: "review" as const,
           };
         });
-        return [{ bounds, cropDataUrl: crop.toDataURL("image/png"), templateId: template?.id || null, fieldCrops, fieldQualitySummary: fieldQualitySummary(fieldCrops, { requiredFields: REQUIRED_REVIEW_FIELDS }) as EmbeddedSlipRecord["fieldQualitySummary"], data: {
+        return [{ bounds, cropDataUrl: crop.toDataURL("image/png"), templateId: template?.id || null, fieldCrops, fieldQualitySummary: fieldQualitySummary(fieldCrops, { requiredFields: REQUIRED_REVIEW_FIELDS }) as EmbeddedSlipRecord["fieldQualitySummary"],
+          ocrTextBoxes:candidate.ocrTextBoxes,
+          ocrDiagnosticTrace:candidate.geminiReview?createGeminiReviewTrace(candidate.geminiReview,candidate.sourceIndex) as SlipOcrDiagnosticTrace:undefined,
+          data: {
           ...candidate.data,
           warnings: [...candidate.data.warnings, `${engineLabel} ตรวจพบกรอบสลิปจากภาพต้นฉบับ; หลักฐานภาพและ ${candidate.visual_cues.join(" / ")}; รอตรวจทาน`],
         } }];
@@ -1234,7 +1248,11 @@ export default function MasterEvidenceWorkspace() {
         throw new Error("พิกัดกรอบที่ Gemini ส่งกลับไม่ถูกต้อง; ไม่บันทึกผลบางส่วน");
       }
       if (!proposals.length) {
-        setAiScanMessage(`${engineLabel} ไม่พบสลิปใน ${item.file.name}; ภาพยังอยู่ในคิวและยังต้องตรวจด้วยตา`);
+        if(result.geminiReview){
+          const trace=createGeminiReviewTrace(result.geminiReview) as SlipOcrDiagnosticTrace;
+          setStagedQueue(current=>current.map(entry=>entry.id===itemId?{...entry,ocrDiagnosticTrace:trace}:entry));
+        }
+        setAiScanMessage(result.geminiReview?.slipAssessments.length?`${engineLabel} อ่านข้อมูลได้ แต่กรอบสลิปยังไม่ผ่าน ตรวจข้อเสนอราย field ด้านล่าง — review_required`:`${engineLabel} ไม่พบสลิปใน ${item.file.name}; ภาพยังอยู่ในคิวและยังต้องตรวจด้วยตา`);
         return;
       }
       const pagesBefore = stagedQueue.slice(0, stagedQueue.findIndex((entry) => entry.id === itemId))
@@ -1250,8 +1268,9 @@ export default function MasterEvidenceWorkspace() {
           added = entry.data ? 0 : 1;
           return {
             ...entry, status: "done" as const, error: undefined, meta: entry.meta || result.metadata,
-            data: entry.data ? mergeAiSlipProposal(entry.data, proposal.data) as SlipExtraction : proposal.data,
+            data: entry.data ? (proposal.ocrDiagnosticTrace?.geminiReview?mergeGeminiReviewedCandidate(entry.data,proposal.data):mergeAiSlipProposal(entry.data, proposal.data)) as SlipExtraction : proposal.data,
             sourceBounds: proposal.bounds, cropDataUrl: proposal.cropDataUrl, templateId: proposal.templateId, fieldCrops: proposal.fieldCrops, fieldQualitySummary: proposal.fieldQualitySummary, isConfirmed: false,
+            ocrTextBoxes:proposal.ocrTextBoxes,ocrDiagnosticTrace:proposal.ocrDiagnosticTrace,
             aiProposedFields: entry.data
               ? [...new Set([...(entry.aiProposedFields || []), ...getAiFilledFields(entry.data, proposal.data)])]
               : ["all"],
@@ -1259,10 +1278,12 @@ export default function MasterEvidenceWorkspace() {
         }
         const records = [...(entry.embeddedSlips || [])];
         for (const [index, proposal] of proposals.entries()) {
-          const match = findMatchingSlipRecord(records, proposal.bounds, proposal.data);
+          const occurrenceIndex=proposal.ocrDiagnosticTrace?.geminiSourceIndex;
+          const eligible=proposal.ocrDiagnosticTrace?.geminiReview?records.filter(record=>record.ocrDiagnosticTrace?.geminiSourceIndex===undefined||record.ocrDiagnosticTrace.geminiSourceIndex===occurrenceIndex):records;
+          const match = findMatchingSlipRecord(eligible, proposal.bounds, proposal.ocrDiagnosticTrace?.geminiReview?null:proposal.data);
           if (match) {
             const matchIndex = records.findIndex((record) => record.id === match.id);
-            let mergedData = clearUnreproducedAiNames(
+            let mergedData = proposal.ocrDiagnosticTrace?.geminiReview?mergeGeminiReviewedCandidate(records[matchIndex].data,proposal.data):clearUnreproducedAiNames(
               records[matchIndex],
               mergeAiSlipProposal(records[matchIndex].data, proposal.data),
             );
@@ -1286,6 +1307,7 @@ export default function MasterEvidenceWorkspace() {
             records[matchIndex] = {
               ...records[matchIndex], data: mergedData,
               sourceBounds: proposal.bounds, cropDataUrl: proposal.cropDataUrl, templateId: proposal.templateId, fieldCrops: proposal.fieldCrops, fieldQualitySummary: proposal.fieldQualitySummary,
+              ocrTextBoxes:proposal.ocrTextBoxes,ocrDiagnosticTrace:proposal.ocrDiagnosticTrace,
               isConfirmed: false, needsReview: true,
               aiProposedFields: [...new Set([...(match.aiProposedFields || []), ...getAiFilledFields(match.data, proposal.data)])],
             };
@@ -1306,6 +1328,7 @@ export default function MasterEvidenceWorkspace() {
             sourceReferences: [{ sourceItemId: entry.id, fileName: entry.file.name, sha256: result.metadata!.sha256, bounds: proposal.bounds }],
             data: proposal.data, sourceBounds: proposal.bounds, candidateBounds: mapped.candidate.bounds,
             cropDataUrl: proposal.cropDataUrl, templateId: proposal.templateId, fieldCrops: proposal.fieldCrops, fieldQualitySummary: proposal.fieldQualitySummary,
+            ocrTextBoxes:proposal.ocrTextBoxes,ocrDiagnosticTrace:proposal.ocrDiagnosticTrace,
             chatPageNumber: mapped.streamPageNumber, chatPageCount: slices.length,
             dossierPageNumber: 4 + pagesBefore + mapped.sliceIndex,
             isDuplicate: false, isConfirmed: false, needsReview: true,
@@ -1313,7 +1336,8 @@ export default function MasterEvidenceWorkspace() {
           });
           added += 1;
         }
-        return { ...entry, embeddedSlips: records };
+        return { ...entry, embeddedSlips: records,
+          ...(result.geminiReview?{ocrDiagnosticTrace:createGeminiReviewTrace(result.geminiReview) as SlipOcrDiagnosticTrace}:{}) };
       });
       await saveEvidenceQueueSnapshot(serializeEvidenceQueueSnapshot(prepareResearchQueueForPersistence(nextQueue), manifestList));
       setStagedQueue(nextQueue);
@@ -3811,12 +3835,12 @@ export default function MasterEvidenceWorkspace() {
       {/* -----------------------------------------------------------------------
           4-STEP WORKFLOW STEPPER BAR (Workflow State Machine)
           ----------------------------------------------------------------------- */}
-      <div className="h-11 px-6 bg-black/35 border-b border-white/5 flex items-center justify-between shrink-0 text-xs">
-        <div className="flex items-center gap-6">
+      <div className="min-h-11 px-6 py-2 bg-black/35 border-b border-white/5 flex flex-wrap items-center justify-between gap-x-6 gap-y-2 shrink-0 text-xs">
+        <div className="flex min-w-0 flex-[1_1_44rem] flex-wrap items-center gap-x-4 gap-y-2">
           {WORKFLOW_STEPS.map((s, idx) => (
             <React.Fragment key={s.id}>
               <div
-                className={`flex items-center gap-2 font-semibold cursor-pointer transition-colors ${
+                className={`flex shrink-0 items-center gap-2 whitespace-nowrap font-semibold cursor-pointer transition-colors ${
                   currentStep === s.id
                     ? "text-sky-400"
                     : currentStep > s.id
@@ -3845,20 +3869,20 @@ export default function MasterEvidenceWorkspace() {
           ))}
         </div>
 
-        <div className="flex items-center gap-3 text-slate-400 font-mono text-xs">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center justify-end gap-x-3 gap-y-2 text-slate-400 font-mono text-xs">
           <OcrProviderControls disabled={loading || stagedQueue.some(item=>item.status === "processing") || aiScanItemId !== null} />
-          <span>เลขเรื่องที่:</span>
+          <span className="shrink-0 whitespace-nowrap">เลขเรื่องที่:</span>
           <input
             type="text"
             value={caseNumber}
             onChange={(e) => setCaseNumber(e.target.value)}
-            className="bg-black/30 border border-white/10 px-2 py-0.5 rounded text-slate-200 font-mono text-xs w-36"
+            className="shrink-0 bg-black/30 border border-white/10 px-2 py-0.5 rounded text-slate-200 font-mono text-xs w-36"
           />
-          <span className="text-emerald-400 font-bold">● 3453 ONLINE</span>
+          <span className="shrink-0 whitespace-nowrap text-emerald-400 font-bold">● 3453 ONLINE</span>
           {batch500Status && batch500Status.state !== "idle" && (
             <span
               title={batch500Status.updatedAt ? `อัปเดตล่าสุด ${new Date(batch500Status.updatedAt).toLocaleString("th-TH")}` : "ยังไม่มี checkpoint"}
-              className={`font-bold ${batch500Status.state === "running" ? "text-sky-300" : batch500Status.state === "stalled" || batch500Status.state === "stopped" ? "text-amber-300" : "text-slate-400"}`}
+              className={`shrink-0 whitespace-nowrap font-bold ${batch500Status.state === "running" ? "text-sky-300" : batch500Status.state === "stalled" || batch500Status.state === "stopped" ? "text-amber-300" : "text-slate-400"}`}
             >
               {batch500Status.state === "running"
                 ? `● BATCH 500 ${batch500Status.terminal ?? 0}/${batch500Status.total ?? 0} · เหลือ ${batch500Status.pending ?? 0} · fail ${batch500Status.failed ?? 0}`
@@ -4182,6 +4206,7 @@ export default function MasterEvidenceWorkspace() {
                   ))}
                 </div>
                 {aiScanMessage && <div role="status" className="text-[10px] text-amber-200">{aiScanMessage}</div>}
+                {visibleGeminiReview && <GeminiReviewDetails report={visibleGeminiReview}/>}
               </div>
             )}
 
@@ -4405,6 +4430,7 @@ export default function MasterEvidenceWorkspace() {
                           <details className="mt-1 text-[9px] text-slate-400">
                             <summary className="cursor-pointer text-sky-300">หลักฐาน OCR ของ candidate · ข้อความ OCR ทั้งหมดและที่มา</summary>
                             <pre className="mt-1 whitespace-pre-wrap break-words font-sans">{(record.data.raw_text || []).join("\n")}</pre>
+                            {record.ocrDiagnosticTrace?.geminiReview && <GeminiReviewDetails report={record.ocrDiagnosticTrace.geminiReview} sourceIndex={record.ocrDiagnosticTrace.geminiSourceIndex}/>}
                             {record.ocrTextBoxes?.length ? (
                               <div className="mt-1 border-t border-white/10 pt-1 font-mono">
                                 {record.ocrTextBoxes.map((box, boxIndex) => (
