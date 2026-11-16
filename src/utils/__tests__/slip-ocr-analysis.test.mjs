@@ -16,6 +16,21 @@ const boundedLine = (text, x0, y0, x1, y1, confidence = 90) => ({
   bbox: { x0, y0, x1, y1 },
 });
 
+test('QR slip boundaries and date-time evidence exclude chat clocks above and beside the slip',()=>{
+  const lines=[boundedLine('22:18',431,100,479,115),
+    boundedLine('โอนเงินสำเร็จ',309,506,650,535),boundedLine('รหัสอ้างอิง A885bbdab3b674862',309,550,650,577),
+    boundedLine('จาก',309,593,370,620),boundedLine('นายสมชาย ใจดี',309,633,600,660),
+    boundedLine('กรุงไทย',309,670,500,700),boundedLine('ไปยัง',309,720,380,744),
+    boundedLine('น.ส. จิณห์นิภา ประสาทเขตรการ',309,755,730,780),
+    boundedLine('จำนวนเงิน 10,000.00 บาท',309,875,760,903),boundedLine('ค่าธรรมเนียม 0.00 บาท',309,910,760,937),
+    boundedLine('วันที่ทำรายการ 11 มิ.ย. 2568 - 22:40',309,950,760,977),boundedLine('07:44',224,989,276,1004)];
+  const candidates=findSlipOcrRegions(lines,{width:807,height:1115},{qrAnchor:{x:720,y:550},includeRecipientSearchBand:true});
+  const candidate=candidates.find(c=>c.amount===10000);
+  assert.ok(candidate);
+  assert.ok(candidate.bounds.y0>400);
+  assert.equal(candidate.ocrLineEvidence.filter(b=>b.supportsFields.includes('date_time')).some(b=>/^(22:18|07:44)$/.test(b.text)),false);
+});
+
 test("reads sender name only from an explicit sender label, including common Thai OCR error", () => {
   const sender = findSenderName([
     line("๑๐   อาก", 100, 82),
@@ -1036,7 +1051,9 @@ test("OCR crop names with repeated prefixes group together while every source pa
   ]);
   assert.equal(summary.detectedSlipCount, 3);
   assert.equal(summary.groups.length, 1);
-  assert.equal(summary.groups[0].totalAmount, 8000);
+  // These fixtures have names/amounts only, not the mandatory slip components.
+  assert.equal(summary.groups[0].totalAmount, 0);
+  assert.deepEqual(summary.groups[0].records.map(record=>record.amount),[2000,4000,2000]);
   assert.deepEqual(summary.groups[0].records.map(({ chatPage, dossierPage }) => ({ chatPage, dossierPage })), pageReferences);
 });
 test("does not treat the QR footer instruction as a recipient name", () => {

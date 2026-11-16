@@ -864,7 +864,14 @@ export function findSlipOcrRegions(
     const supportedByQrEvidence = !!options.qrAnchor && !!amountLine && bankName && transactionReferenceCue;
     if (!supportedAmount && !supportedWithoutAmount && !supportedByQrEvidence) continue;
 
-    const parsedDateTime = parseThaiDateTime(transactionLines);
+    const dateTimeLines = options.qrAnchor ? transactionLines.filter(line => {
+      if (!/^\s*\d{1,2}:\d{2}(?::\d{2})?\s*$/u.test(line.text)) return true;
+      const centerX=(line.bbox.x0+line.bbox.x1)/2;
+      return transactionLines.some(other => other !== line && parseThaiDateTime([other]).date
+        && Math.abs((other.bbox.y0+other.bbox.y1-line.bbox.y0-line.bbox.y1)/2) <= 80
+        && centerX >= other.bbox.x0 && centerX <= other.bbox.x1);
+    }) : transactionLines;
+    const parsedDateTime = parseThaiDateTime(dateTimeLines);
     const referenceLine = transactionLines.find((line) => hasReferenceCue(line.normalized) && parseReference(line.text));
     const referenceNo = referenceLine ? parseReference(referenceLine.text) : null;
     const referenceTimestamp = !parsedDateTime.date
@@ -1016,6 +1023,7 @@ export function findSlipOcrRegions(
       selectedEvidence.set(line, fields);
     };
     addEvidence(anchor, hasSuccessCue(anchor.normalized) ? "status" : "amount");
+    addEvidence(nearby.find(line => hasSuccessCue(line.normalized)), "status");
     addEvidence(amountLine, "amount");
     addEvidence(feeLine, "fee");
     addEvidence(bankLine, "bank");
@@ -1029,7 +1037,7 @@ export function findSlipOcrRegions(
     addEvidence(receiverAccountLine, "receiver_account");
     addEvidence(senderBankLine, "sender_bank");
     addEvidence(receiverBankLine, "receiver_bank");
-    for (const line of transactionLines) {
+    for (const line of dateTimeLines) {
       const parsed = parseThaiDateTime([line]);
       if (parsed.date || parsed.time) addEvidence(line, "date_time");
     }

@@ -3,7 +3,7 @@ import type { LocalSlipCandidate } from "@/utils/local-qr-extractor";
 import { findRecipientName, findRecipientNameWithLine, findSenderName, findSlipOcrRegions, toSlipExtraction } from "@/utils/slip-ocr-analysis";
 import { filterTextOnlySlipRegionsForJob } from "@/utils/ocr-analysis-policy.mjs";
 import { getQrAnchoredOcrCrop, getRecipientRetryCropBounds, type PixelBounds } from "@/utils/qr-anchored-ocr-crop";
-import { enhanceOcrPixels, getOcrEnhancementScale } from "@/utils/enhance-for-ocr.mjs";
+import { enhanceOcrPixels, getOcrEnhancementScale, separateChromaInk } from "@/utils/enhance-for-ocr.mjs";
 import { segmentOcrTextLines } from "@/utils/two-layer-segmentation.mjs";
 import { createColorSeparatedOcrCanvas, createMorphologicalSlipOcrCanvas, detectChatVisualRegions, findQrSlipObjectBounds } from "@/utils/chat-visual-contours.mjs";
 import { createFieldRetryCanvas } from "@/utils/ocr-retry-preprocessing.mjs";
@@ -14,6 +14,7 @@ import { createCanvasEvidenceArtifact } from "@/utils/evidence-image-artifacts.m
 import { buildOcrAttemptTrace, explainSlipOcrRegionRejection } from "@/utils/slip-ocr-trace.mjs";
 import { attachOcrTraceToQrCandidates } from "@/utils/local-ocr-fallback.mjs";
 import { buildLocalOcrPassPlan } from "@/utils/local-slip-ocr-plan.mjs";
+import { getSlipStatusRetryBounds } from "@/utils/slip-status-retry.mjs";
 import type { SlipOcrAttemptTrace, SlipOcrDiagnosticTrace, SlipOcrRegionTrace } from "@/types/slip-ocr-trace";
 import {
   evaluateEnhancedOcrRetry,
@@ -113,6 +114,7 @@ function makeEnhancedOcrCrop(
   bounds: PixelBounds,
   maxScale = 2.5,
   maxDimension = 1800,
+  preserveColor = false,
 ): { canvas: HTMLCanvasElement; scale: number } {
   const crop = makeCanvasCrop(source, bounds);
   const scale = getOcrEnhancementScale(crop.width, crop.height, maxScale, maxDimension);
@@ -123,7 +125,7 @@ function makeEnhancedOcrCrop(
   if (context) {
     context.drawImage(crop, 0, 0, enlarged.width, enlarged.height);
     const image = context.getImageData(0, 0, enlarged.width, enlarged.height);
-    image.data.set(enhanceOcrPixels(image.data, enlarged.width, enlarged.height).pixels);
+    if (!preserveColor) image.data.set(enhanceOcrPixels(image.data, enlarged.width, enlarged.height).pixels);
     context.putImageData(image, 0, 0);
   }
   return { canvas: enlarged, scale };
@@ -313,6 +315,37 @@ export async function extractSlipCandidatesWithLocalOcr(
         options.onRetryDiagnostic?.(decision.diagnostic);
         if (decision.accepted) {
           lines = enhancedLines;
+        }
+      }
+      const statusRetryBounds = getSlipStatusRetryBounds(lines, {
+        x:qrCandidate.bounds.x-cropBounds.x,y:qrCandidate.bounds.y-cropBounds.y,
+        width:qrCandidate.bounds.width,height:qrCandidate.bounds.height,
+      }, {width:qrCrop.width,height:qrCrop.height});
+      if (statusRetryBounds) {
+        const variants = [makeEnhancedOcrCrop(qrCrop,statusRetryBounds,3,1600)];
+        const color = makeEnhancedOcrCrop(qrCrop,statusRetryBounds,3,1600,true);
+        const colorContext = color.canvas.getContext("2d");
+        if (colorContext) {
+          const pixels = colorContext.getImageData(0,0,color.canvas.width,color.canvas.height);
+          pixels.data.set(separateChromaInk(pixels.data));
+          colorContext.putImageData(pixels,0,0);
+          variants.push(color);
+        }
+        for (const [variantIndex,retry] of variants.entries()) {
+        const {data} = await recognizeSingleLine(worker,retry.canvas);
+        const statusLines = getOcrLines(data);
+        const absoluteRetryBounds = {...statusRetryBounds,x:cropBounds.x+statusRetryBounds.x,y:cropBounds.y+statusRetryBounds.y};
+        diagnosticAttempts.push(buildOcrAttemptTrace({id:`status-${diagnosticAttempts.length+1}`,scope:"qr_crop",trigger:"missing_fields",
+          sourceBounds:absoluteRetryBounds,inputWidth:retry.canvas.width,inputHeight:retry.canvas.height,scale:retry.scale,
+          meanConfidence:data.confidence,lines:statusLines}));
+        registerArtifact({id:`status-${diagnosticAttempts.length}`,kind:variantIndex ? "segmentation_mask" : "ocr_variant",variant:variantIndex ? "status-chroma-ink" : "status-single-line",canvas:retry.canvas,
+          scale:retry.scale,sourceBounds:absoluteRetryBounds,stages:["label_crop","qr_excluded",...(variantIndex ? ["chroma_ink_mask"] : []),"single_line_ocr"]});
+        for (const line of statusLines) {
+          if (!/โอนเงินสำเร็จ/u.test(line.text.normalize("NFC").replace(/\u0e4d\u0e32/gu,"ำ"))) continue;
+          lines.push({...line,bbox:{x0:statusRetryBounds.x+line.bbox.x0/retry.scale,y0:statusRetryBounds.y+line.bbox.y0/retry.scale,
+            x1:statusRetryBounds.x+line.bbox.x1/retry.scale,y1:statusRetryBounds.y+line.bbox.y1/retry.scale}});
+        }
+        if (statusLines.some(line=>/โอนเงินสำเร็จ/u.test(line.text.normalize("NFC").replace(/\u0e4d\u0e32/gu,"ำ")))) break;
         }
       }
       const normalizedLines = lines.map((line) => ({

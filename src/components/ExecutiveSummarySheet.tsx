@@ -48,7 +48,7 @@ export default function ExecutiveSummarySheet({ evidence, caseNumber, suspectNam
           <div className="p-3.5 bg-emerald-50 border border-emerald-300 rounded text-center">
             <div className="text-xs text-emerald-800 font-semibold">ยอดรวมหลังตรวจรายการซ้ำ (Net Total)</div>
             <div className="font-mono text-2xl font-bold text-emerald-700 mt-1">
-              ฿ {evidence.totalNetLoss.toLocaleString("th-TH", { minimumFractionDigits: 2 })}
+              {evidence.slipCount > 0 ? `฿ ${evidence.totalNetLoss.toLocaleString("th-TH", { minimumFractionDigits: 2 })}` : "ยังสรุปยอดไม่ได้"}
             </div>
             <div className="text-[10px] text-emerald-600 mt-0.5">คำนวณจากรายการที่ผู้ใช้ยืนยัน โดยไม่ตัดจากสัญญาณซ้ำอัตโนมัติ</div>
           </div>
@@ -83,7 +83,7 @@ export default function ExecutiveSummarySheet({ evidence, caseNumber, suspectNam
             <div>
               <span className="text-slate-600 font-medium">ยอดเงินที่เชื่อมโยงกับรายการของบุคคลนี้: </span>
               <span className="font-mono font-bold text-emerald-700">
-                ฿ {evidence.poiLossSum.toLocaleString("th-TH", { minimumFractionDigits: 2 })}
+                {evidence.slipCount > 0 ? `฿ ${evidence.poiLossSum.toLocaleString("th-TH", { minimumFractionDigits: 2 })}` : "ยังสรุปยอดไม่ได้"}
               </span>
             </div>
             <div>

@@ -1,4 +1,5 @@
 import { removeThaiTitlePrefix } from "./recipient-name-normalization.mjs";
+import { evaluateSlipBatch } from "./slip-calculation-gate.mjs";
 import type { SlipOcrDiagnosticTrace, SlipOcrTraceBounds } from "../types/slip-ocr-trace";
 import type { EmbeddedSlipRecord } from "../types/embedded-slip";
 
@@ -30,13 +31,14 @@ export interface DetectedSlipRecipientRecord {
     receiver?: { name?: string | null; account_no?: string | null; bank?: string | null };
     confidence?: { receiver_name?: number | null };
     reviewed_fields?: string[];
-    transaction?: { amount?: number | null };
+    transaction?: { amount?: number | null; reference_no?: string | null };
     raw_text?: string[];
     warnings?: string[];
   };
 }
 
 export interface SlipRecipientSummaryRecord extends DetectedSlipRecipientRecord {
+  calculationGate: ReturnType<typeof evaluateSlipBatch>[number];
   amount: number | null;
   missingFields: string[];
   suggestedRecipientName?: string;
@@ -71,6 +73,7 @@ export function formatRecipientReviewStatus(record: SlipRecipientSummaryRecord):
 }
 
 export function summarizeDetectedSlipRecipients(records: DetectedSlipRecipientRecord[]) {
+  const gates = evaluateSlipBatch(records);
   const groups = new Map<string, SlipRecipientGroup>();
   const unassignedRecords: SlipRecipientSummaryRecord[] = [];
 
@@ -143,6 +146,7 @@ export function summarizeDetectedSlipRecipients(records: DetectedSlipRecipientRe
     ];
     const summaryRecord: SlipRecipientSummaryRecord = {
       ...record,
+      calculationGate: gates[records.indexOf(record)],
       amount,
       missingFields,
       receiverNameNeedsReview,
@@ -173,7 +177,7 @@ export function summarizeDetectedSlipRecipients(records: DetectedSlipRecipientRe
       records: [],
     };
     group.records.push(summaryRecord);
-    if (amount !== null) {
+    if (amount !== null && summaryRecord.calculationGate.eligible) {
       group.totalAmount += amount;
       group.amountCount += 1;
     }

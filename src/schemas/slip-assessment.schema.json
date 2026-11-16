@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:digital-evidence:slip-assessment:v3",
+  "title": "Per-slip calculation assessment; not transaction authenticity",
+  "type": "object",
+  "required": ["policyVersion", "score", "bonusScore", "assessmentStatus", "components", "amount", "eligible", "reviewStatus"],
+  "properties": {
+    "policyVersion": { "const": "slip-eight-required-optional-memo.v3" },
+    "bonusScore": { "enum": [0, 10.1] },
+    "score": { "enum": [100, null] },
+    "assessmentStatus": { "enum": ["complete", "unknown", "region_invalid"] },
+    "amount": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+    "eligible": { "type": "boolean" },
+    "reviewStatus": { "enum": ["human_reviewed", "review_required"] },
+    "components": {
+      "type": "array", "minItems": 9, "maxItems": 9,
+      "items": {
+        "type": "object", "required": ["id", "status", "evidence"],
+        "properties": {
+          "id": { "enum": ["success", "reference", "sender", "receiver", "amount", "fee", "datetime", "note", "qr"] },
+          "status": { "enum": ["found", "absent", "unknown"] },
+          "evidence": { "type": "array" }
+        },
+        "allOf": [{ "if": { "properties": { "status": { "const": "found" } } }, "then": { "properties": { "evidence": { "minItems": 1 } } } }]
+      },
+      "allOf": [
+        { "contains": { "properties": { "id": { "const": "success" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "id": { "const": "reference" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "id": { "const": "sender" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "id": { "const": "receiver" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "id": { "const": "amount" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "id": { "const": "fee" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "id": { "const": "datetime" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "id": { "const": "note" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "id": { "const": "qr" } } }, "minContains": 1, "maxContains": 1 }
+      ]
+    }
+  },
+  "allOf": [
+    { "if": { "properties": { "score": { "const": 100 } } }, "then": { "properties": { "assessmentStatus": { "const": "complete" }, "components": { "items": { "if": { "properties": { "id": { "not": { "const": "note" } } } }, "then": { "properties": { "status": { "const": "found" } } } } } } } },
+    { "if": { "properties": { "eligible": { "const": true } } }, "then": { "properties": { "score": { "const": 100 }, "assessmentStatus": { "const": "complete" }, "amount": { "type": "number", "exclusiveMinimum": 0 }, "components": { "items": { "if": { "properties": { "id": { "not": { "const": "note" } } } }, "then": { "properties": { "status": { "const": "found" } } } } } } } },
+    { "if": { "properties": { "assessmentStatus": { "enum": ["unknown", "region_invalid"] } } }, "then": { "properties": { "score": { "type": "null" }, "eligible": { "const": false } } } }
+  ]
+}

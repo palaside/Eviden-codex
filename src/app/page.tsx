@@ -34,13 +34,16 @@ import {
 } from "@/utils/forensic-header-machine";
 import { extractSlipsLocally } from "@/utils/local-qr-extractor";
 import { clearUnreproducedAiNames, findMatchingSlipRecord, getAiFilledFields, mergeAiSlipProposal, projectAiSlipBounds, retainAiOnlyRecordsAfterReprocess, retainSenderNameAfterReprocess } from "@/utils/ai-slip-candidate.mjs";
-import { extractSlipCandidatesWithLocalOcr, getCachedChatEvidenceLayers, readChatPreflight } from "@/utils/local-slip-ocr";
+import { extractSlipCandidatesWithLocalOcr, getCachedChatEvidenceLayers, readChatPreflight } from "@/utils/ocr-adapter";
+import { fetchGeminiDetectionBridge, subscribeGeminiBridgeErrors } from "@/utils/gemini-ocr-bridge-client.mjs";
+import OcrProviderControls from "@/components/OcrProviderControls";
 import { explainSlipOcrRegionRejection } from "@/utils/slip-ocr-trace.mjs";
 import { finalizeSlipCandidates } from "@/utils/finalize-slip-candidates.mjs";
 import { buildSlipExtractionStatus, buildSlipQrWarning } from "@/utils/slip-extraction-status.mjs";
 import { selectSlipTemplate } from "@/utils/slip-template-registry.mjs";
 import { buildTemplateFieldPlan, mergeTemplateAndOcrFields, toCanonicalFieldName } from "@/utils/template-field-crops.mjs";
 import { buildDiagnosticOcrFieldPlan } from "@/utils/diagnostic-ocr-field-plan.mjs";
+import { projectSlipCalculationRecords } from "@/utils/slip-calculation-gate.mjs";
 import { mergeGeminiFieldBundle } from "@/utils/gemini-field-bundle.mjs";
 import { fetchWithTimeout } from "@/utils/fetch-with-timeout.mjs";
 
@@ -288,6 +291,8 @@ function selectBestSlipCandidate<T extends { data: SlipExtraction }>(candidates:
     merged.confidence.reference_no = qrCandidate.data.confidence.reference_no;
   }
   merged.raw_text = [...new Set(candidates.flatMap((candidate) => candidate.data.raw_text || []))];
+  const mappedMemos = [...new Set(candidates.filter(candidate=>candidate.data.warnings.includes("raw_ocr_copied_to_memo_not_a_verbatim_bank_note")).map(candidate=>candidate.data.transaction.note).filter((note):note is string=>typeof note === "string"))];
+  if (mappedMemos.length === 1) merged.transaction.note = mappedMemos[0];
   merged.warnings = [...new Set(candidates.flatMap((candidate) => candidate.data.warnings || []))];
   const missingLabels = [
     ["วันที่", merged.transaction.date],
@@ -358,6 +363,7 @@ import { clearEvidenceQueueSnapshot, EXTRACTION_VERSION, loadEvidenceQueueSnapsh
 import { buildEvidenceDiagnosticTrace } from "@/utils/evidence-diagnostic-trace.mjs";
 import { classifyUniqueEvidenceItems } from "@/utils/evidence-detection-pipeline.mjs";
 import { matchLegalSignalsInText, getLegalSignalDictionaryMetadata } from "@/utils/legal-signal-matcher.mjs";
+import { buildMemoLegalSignalHits } from "@/utils/memo-legal-signals.mjs";
 import { selectDerivedProcessingSource } from "@/utils/derived-processing-source.mjs";
 import { attachResearchRun, formatReviewCanvasLabel, getResearchArtifacts, getReviewPreviewSource, prepareResearchQueueForPersistence, resolveReviewCanvasSource } from "@/utils/review-preview-source.mjs";
 import { shouldRenderChatSlices } from "@/utils/review-canvas-render-mode.mjs";
@@ -426,7 +432,7 @@ type LegalSignalHit = {
   page: number;
   text: string;
   confidence: number;
-  bounds: { x: number; y: number; width: number; height: number };
+  bounds: { x: number; y: number; width: number; height: number } | null;
   provisionId: string;
   lawId: string;
   phrase: string;
@@ -558,6 +564,8 @@ export default function MasterEvidenceWorkspace() {
   const [exportStatus, setExportStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [searchSlipScanStatus, setSearchSlipScanStatus] = useState<SearchSlipScanStatus>({ state: "idle", message: "" });
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Route bridge failures to the existing error banner without changing its UI.
+  useEffect(() => subscribeGeminiBridgeErrors((message: string) => setErrorMsg(message)), []);
   const [queueRestoreNotice, setQueueRestoreNotice] = useState<string | null>(null);
   const [batch500Status, setBatch500Status] = useState<Batch500VisibleStatus | null>(null);
 
@@ -583,7 +591,7 @@ export default function MasterEvidenceWorkspace() {
   const [detectedNamesModalOpen, setDetectedNamesModalOpen] = useState(false);
 
   // Pure Zero State (SSOT Bi-Directional State)
-  const [evidenceState, setEvidenceState] = useState<ForensicEvidenceState>(PURE_ZERO_STATE);
+  const [storedEvidenceState, setEvidenceState] = useState<ForensicEvidenceState>(PURE_ZERO_STATE);
 
   // ---------------------------------------------------------------------------
   // 2-PHASE FORENSIC STAGING BUFFER ARCHITECTURE (SSOT)
@@ -702,18 +710,11 @@ export default function MasterEvidenceWorkspace() {
     : {};
   const summaryIndexReady = ledgerRecords.length > 0
     && ledgerRecords.every((record) => Number.isInteger(summaryPhysicalPages[record.id]) && summaryPhysicalPages[record.id] > 0);
-  const ledgerReconciliation = useMemo(() => summarizeConfirmedSlipRecords(ledgerRecords.map((record) => ({
-    id: record.id,
-    isConfirmed: record.isConfirmed,
-    amount: record.data.transaction.amount,
-    referenceNo: record.data.transaction.reference_no,
-  }))), [ledgerRecords]);
-  const reviewedDuplicateSummary = useMemo(() => reconcileReviewedDuplicateReferences(ledgerRecords.map((record) => ({
-    id: record.id,
-    isConfirmed: record.isConfirmed,
-    amount: record.data.transaction.amount,
-    referenceNo: record.data.transaction.reference_no,
-  })), duplicateReferenceResolutions), [ledgerRecords, duplicateReferenceResolutions]);
+  const ledgerReconciliation = useMemo(() => summarizeConfirmedSlipRecords(projectSlipCalculationRecords(ledgerRecords)), [ledgerRecords]);
+  const evidenceState = useMemo(() => ({ ...storedEvidenceState, totalNetLoss:ledgerReconciliation.totalAmount,
+    poiLossSum:ledgerReconciliation.totalAmount, slipCount:ledgerReconciliation.slipCount,
+    duplicateCount:ledgerReconciliation.duplicateCount }), [storedEvidenceState, ledgerReconciliation]);
+  const reviewedDuplicateSummary = useMemo(() => reconcileReviewedDuplicateReferences(projectSlipCalculationRecords(ledgerRecords), duplicateReferenceResolutions), [ledgerRecords, duplicateReferenceResolutions]);
   const slipRecipientSummary = useMemo(
     () => summarizeDetectedSlipRecipients(ledgerRecords),
     [ledgerRecords]
@@ -771,8 +772,8 @@ export default function MasterEvidenceWorkspace() {
         }
       }
     }
-    return hits;
-  }, [stagedQueue]);
+    return [...hits, ...buildMemoLegalSignalHits(ledgerRecords)];
+  }, [stagedQueue, ledgerRecords]);
   const legalSignalMetadata = getLegalSignalDictionaryMetadata();
   const [legalResearchByHit, setLegalResearchByHit] = useState<Record<string, LegalResearchResult>>({});
   const [legalResearchingHitId, setLegalResearchingHitId] = useState<string | null>(null);
@@ -937,13 +938,13 @@ export default function MasterEvidenceWorkspace() {
     [stagedQueue],
   );
   const recomputeConfirmedEvidence = (queue: typeof stagedQueue) => {
-    const records = queue.flatMap((item) => {
+    const records = projectSlipCalculationRecords(queue.flatMap((item) => {
       if (item.status !== "done") return [];
       if (item.category === "CHAT") {
-        return (item.embeddedSlips || []).map((record) => ({ id: record.id, isConfirmed: !!record.isConfirmed, amount: record.data.transaction.amount, referenceNo: record.data.transaction.reference_no, recipientName: record.data.receiver.name }));
+        return (item.embeddedSlips || []).map(record => ({ id:record.id, data:record.data, isConfirmed:record.isConfirmed, ocrTextBoxes:record.ocrTextBoxes }));
       }
-      return item.data ? [{ id: item.id, isConfirmed: !!item.isConfirmed, amount: item.data.transaction.amount, referenceNo: item.data.transaction.reference_no, recipientName: item.data.receiver.name }] : [];
-    });
+      return item.data ? [{ id:item.id, data:item.data, isConfirmed:item.isConfirmed, ocrTextBoxes:item.ocrTextBoxes }] : [];
+    }));
     const summary = summarizeConfirmedSlipRecords(records);
     let poiName: string | null = null;
     let poiLoss = 0;
@@ -1116,7 +1117,10 @@ export default function MasterEvidenceWorkspace() {
       const body = new FormData();
       body.append("file", item.file, item.file.name);
       body.append("mode", "detect");
-      const response = await fetch(engine === "slipvision" ? "/api/slips/slipvision" : "/api/slips/extract", { method: "POST", body, cache: "no-store" });
+      const useGeminiBridge = engine === "gemini";
+      const response = useGeminiBridge
+        ? await fetchGeminiDetectionBridge(item.file)
+        : await fetch("/api/slips/slipvision", { method: "POST", body, cache: "no-store" });
       const result = await response.json() as {
         success: boolean;
         message?: string;
@@ -1196,7 +1200,8 @@ export default function MasterEvidenceWorkspace() {
       // together, so quota pressure is bounded and field provenance stays grouped.
       for (let proposalIndex = 0; proposalIndex < proposals.length; proposalIndex += 1) {
         const proposal = proposals[proposalIndex];
-        if (!proposal.fieldCrops?.length || engine !== "gemini") continue;
+        // The exact-transcription bridge already returns all fields in one response.
+        if (!proposal.fieldCrops?.length || engine !== "gemini" || useGeminiBridge) continue;
         try {
           const fieldResponse = await fetch("/api/slips/extract", {
             method: "POST",
@@ -2427,13 +2432,13 @@ export default function MasterEvidenceWorkspace() {
 
     // STEP 3 & 4: Deduplication & Reconcile Net Loss (The Net Financial Truth Doctrine)
     const chatCount = currentQueue.reduce((count, item) => count + (!item.isDuplicate && item.category === "CHAT" ? (item.chatSlices?.length ?? 1) : 0), 0);
-    const transactionRecords = currentQueue.flatMap((item) => {
+    const transactionRecords = projectSlipCalculationRecords(currentQueue.flatMap((item) => {
       if (item.status !== "done") return [];
       const records = item.category === "CHAT"
-        ? (item.embeddedSlips || []).map((record) => ({ id: record.id, isConfirmed: !!record.isConfirmed, amount: record.data.transaction.amount, referenceNo: record.data.transaction.reference_no }))
-        : item.data ? [{ id: item.id, isConfirmed: !!item.isConfirmed, amount: item.data.transaction.amount, referenceNo: item.data.transaction.reference_no }] : [];
+        ? (item.embeddedSlips || []).map(record => ({ id:record.id, data:record.data, isConfirmed:record.isConfirmed, ocrTextBoxes:record.ocrTextBoxes }))
+        : item.data ? [{ id:item.id, data:item.data, isConfirmed:item.isConfirmed, ocrTextBoxes:item.ocrTextBoxes }] : [];
       return records;
-    });
+    }));
     const summary = summarizeConfirmedSlipRecords(transactionRecords);
     setEvidenceState({
       totalNetLoss: summary.totalAmount,
@@ -2862,11 +2867,14 @@ export default function MasterEvidenceWorkspace() {
 
   // 2.2 Detected Names Dataset (Strict e-Slip & QR Code Extraction Only)
   const detectedNamesList = useMemo(() => {
-    const eligibleRecords = slipRecipientSummary.groups.flatMap((group) => group.records);
+    const eligibleRecords = slipRecipientSummary.groups.flatMap((group) => group.records).filter(record => record.calculationGate.eligible);
     return buildDetectedTargetPeople(eligibleRecords);
   }, [slipRecipientSummary.groups]);
 
-  const targetList = mergeDetectedTargetList(detectedNamesList, targetListSnapshot);
+  const targetList = mergeDetectedTargetList(detectedNamesList, targetListSnapshot).map(target => {
+    const group = slipRecipientSummary.groups.find(group => isExactTargetMatch(group.name, target.cleanName));
+    return { ...target, totalAmount:group?.totalAmount ?? 0, txCount:group?.amountCount ?? 0 };
+  });
 
   const slipPartyNames = useMemo(() => {
     const names = new Set<string>();
@@ -2905,8 +2913,9 @@ export default function MasterEvidenceWorkspace() {
   let poiAmount = 0;
   let foundTargetTransaction = false;
 
-  ledgerRecords.forEach((record) => {
-    if (!record.isConfirmed) return;
+  const calculationRecords = projectSlipCalculationRecords(ledgerRecords);
+  ledgerRecords.forEach((record, index) => {
+    if (!calculationRecords[index].isConfirmed) return;
     const sender = record.data.sender?.name || "";
     const receiver = record.data.receiver?.name || "";
     const matches = selectedTargetNames.some(
@@ -2922,7 +2931,7 @@ export default function MasterEvidenceWorkspace() {
 
   const amountDisplay = evidenceState.totalNetLoss > 0
     ? `฿ ${evidenceState.totalNetLoss.toLocaleString("th-TH", { minimumFractionDigits: 2 })}`
-    : "฿ 0.00";
+    : "ยังสรุปยอดไม่ได้";
 
   // Evidence Reference Mapping must be derived from observed OCR occurrences.
   // The legal dictionary supplies review leads only; it must never supply a
@@ -3837,6 +3846,7 @@ export default function MasterEvidenceWorkspace() {
         </div>
 
         <div className="flex items-center gap-3 text-slate-400 font-mono text-xs">
+          <OcrProviderControls disabled={loading || stagedQueue.some(item=>item.status === "processing") || aiScanItemId !== null} />
           <span>เลขเรื่องที่:</span>
           <input
             type="text"
@@ -4232,17 +4242,24 @@ export default function MasterEvidenceWorkspace() {
                           />
                           <span className="min-w-0 flex-1 break-words text-xs font-semibold text-slate-100">
                             {pdpaEnabled ? maskPersonName(group.name, true) : group.name}
-                            <span className="ml-1.5 whitespace-nowrap text-[10px] font-normal text-slate-400">{group.records.length} สลิป</span>
+                            <span className="ml-1.5 text-[10px] font-normal text-slate-400">พบ {group.records.length} · คำนวณ {group.amountCount} · ไม่เข้าเกณฑ์ {group.records.filter(r => !r.calculationGate.eligible && !r.calculationGate.duplicateOf).length} · ซ้ำ {group.records.filter(r => r.calculationGate.duplicateOf).length}</span>
                           </span>
                           <span className="shrink-0 text-[11px] font-mono font-bold text-emerald-400">
                             {group.amountCount > 0
                               ? `฿${group.totalAmount.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                              : "ยอดรอตรวจ"}
+                              : "ยังสรุปยอดไม่ได้"}
                           </span>
                         </div>
                         <div className="space-y-1 border-t border-white/10 px-2.5 py-2">
                           {group.records.map((record) => (
                             <div key={record.id} className="text-[10px]">
+                              <div className={record.calculationGate.eligible ? "text-emerald-300" : "text-amber-300"}>
+                                {record.calculationGate.score === null ? "รอตรวจองค์ประกอบ" : `${record.calculationGate.score}/100`} · {record.calculationGate.eligible ? "เข้าเกณฑ์คำนวณ" : "ยังไม่รวมยอด"} · {record.calculationGate.reason}
+                              </div>
+                              <details className="text-slate-300">
+                                <summary className="cursor-pointer">ตรวจเงื่อนไข 9 ข้อ</summary>
+                                {record.calculationGate.components.map((component: { id:string; label:string; status:string }) => <div key={component.id}>{component.label}{component.id === "note" ? " (เสริม ไม่บังคับ)" : ""}: {component.status === "found" ? component.id === "note" ? "พบหลักฐาน · เสริม 10.1" : "พบหลักฐาน" : component.id === "note" ? "ไม่พบข้อมูลเสริม — ไม่ตัดสิทธิ์คำนวณ" : component.status === "absent" ? "ตรวจแล้วว่าไม่มี" : "OCR ยังอ่านไม่ครบ — เปิดภาพตรวจ"}</div>)}
+                              </details>
                               <div className="flex items-center justify-between gap-2">
                                 <div className="min-w-0 text-slate-300">
                                   {record.amount !== null
@@ -4321,6 +4338,7 @@ export default function MasterEvidenceWorkspace() {
                     </div>
                     {slipRecipientSummary.unassignedRecords.map((record) => (
                       <div key={record.id} className="rounded-lg border border-amber-400/20 bg-amber-500/5 px-2.5 py-2">
+                        <div className="text-[10px] text-amber-300">{record.calculationGate.score === null ? "รอตรวจองค์ประกอบ" : `${record.calculationGate.score}/100`} · {record.calculationGate.eligible ? "เข้าเกณฑ์คำนวณ" : "ยังไม่รวมยอด"} · {record.calculationGate.reason}</div>
                         <div className="flex items-center justify-between gap-2 text-xs">
                           <span className="font-semibold text-slate-100">
                             {record.receiverNameNeedsReview
@@ -4957,7 +4975,7 @@ export default function MasterEvidenceWorkspace() {
                   <span className="w-2 h-2 rounded-full bg-sky-400 shadow-[0_0_8px_#38bdf8]"></span>
                 </div>
                 <div className="font-mono text-base font-bold text-sky-400 mt-1 truncate">
-                  ฿ {poiAmount.toLocaleString("th-TH", { minimumFractionDigits: 2 })}
+                  {foundTargetTransaction ? `฿ ${poiAmount.toLocaleString("th-TH", { minimumFractionDigits: 2 })}` : "ยังสรุปยอดไม่ได้"}
                 </div>
                 <div className="flex items-center justify-between text-[10px] text-slate-400 mt-1">
                   <span className="truncate max-w-[95px]">
@@ -5354,7 +5372,7 @@ export default function MasterEvidenceWorkspace() {
                 {extractedData.transaction.note && (
                   <div className="glass-nested p-3.5 rounded-lg thai-clearance-stack">
                     <span className="text-xs text-slate-400">บันทึกช่วยจำ (Memo)</span>
-                    <span className="typo-body text-slate-100">{extractedData.transaction.note}</span>
+                    <div aria-label="ข้อความ Memo" className="typo-body max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-slate-100 [overflow-wrap:anywhere]">{extractedData.transaction.note}</div>
                   </div>
                 )}
               </div>
@@ -5717,8 +5735,10 @@ export default function MasterEvidenceWorkspace() {
                       </td>
                       <td className="p-2.5 text-center font-mono text-[10px] text-sky-300">
                         <span className="block">Ref ซ้ำ {ledgerReconciliation.duplicateCount} จุด · รอตรวจ ฿ {ledgerReconciliation.potentialDuplicateAmount.toLocaleString("th-TH", { minimumFractionDigits: 2 })}</span>
-                        <span className="block text-slate-400">ยอดสุทธิจำลอง ฿ {ledgerReconciliation.provisionalNetAmount.toLocaleString("th-TH", { minimumFractionDigits: 2 })} · ไม่ได้หักจากยอดจริง</span>
-                        <span className="block text-emerald-300">NET หลังคำวินิจฉัยผู้ตรวจ ฿ {reviewedDuplicateSummary.reviewedNetAmount.toLocaleString("th-TH", { minimumFractionDigits: 2 })} · กลุ่มรอตรวจ {reviewedDuplicateSummary.unresolvedGroupCount}</span>
+                        {ledgerReconciliation.slipCount > 0 ? <>
+                          <span className="block text-slate-400">ยอดสุทธิจำลอง ฿ {ledgerReconciliation.provisionalNetAmount.toLocaleString("th-TH", { minimumFractionDigits: 2 })} · ไม่ได้หักจากยอดจริง</span>
+                          <span className="block text-emerald-300">NET หลังคำวินิจฉัยผู้ตรวจ ฿ {reviewedDuplicateSummary.reviewedNetAmount.toLocaleString("th-TH", { minimumFractionDigits: 2 })} · กลุ่มรอตรวจ {reviewedDuplicateSummary.unresolvedGroupCount}</span>
+                        </> : <span className="block text-amber-300">ยังไม่มีรายการยืนยันที่เข้าเกณฑ์สำหรับสรุปยอด</span>}
                       </td>
                     </tr>
                   </tfoot>
@@ -6190,9 +6210,9 @@ export default function MasterEvidenceWorkspace() {
                           <div className="flex flex-wrap items-start justify-between gap-2">
                             <div className="min-w-0">
                               <div className="font-semibold text-slate-100">หน้า {hit.page} · {hit.phrase}</div>
-                              <div className="mt-1 break-words text-[11px] text-amber-100">“{hit.text}”</div>
+                              <div className="mt-1 max-h-40 overflow-y-auto break-words text-[11px] text-amber-100 [overflow-wrap:anywhere]">“{hit.text}”</div>
                               <div className="mt-1 text-[10px] text-slate-500">
-                                {hit.sourceFileName} · SHA {hit.sourceSha256?.slice(0, 12) || "ไม่มี"} · พิกัด {Math.round(hit.bounds.x)},{Math.round(hit.bounds.y)} · OCR {Math.round(hit.confidence * 100)}% · {hit.provisionId}
+                                {hit.sourceFileName} · SHA {hit.sourceSha256?.slice(0, 12) || "ไม่มี"} · {hit.bounds ? `พิกัด ${Math.round(hit.bounds.x)},${Math.round(hit.bounds.y)}` : "Memo OCR · ไม่ทราบพิกัดตัวอักษร"} · OCR {Math.round(hit.confidence * 100)}% · {hit.provisionId}
                               </div>
                             </div>
                             <button

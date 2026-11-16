@@ -21,6 +21,18 @@ const record = (id, name, amount, overrides = {}) => ({
   ...overrides,
 });
 
+test('recipient total excludes incomplete pages and duplicate transactions', () => {
+  const complete = (id, ref) => record(id, 'สมชาย ใจดี', 10000, {
+    data: { receiver: { name:'สมชาย ใจดี' }, transaction:{ amount:10000, reference_no:ref }, raw_text:['0002010102121234567890'] },
+    ocrTextBoxes: ['โอนเงินสำเร็จ','รหัสอ้างอิง','จาก','ไปยัง','จำนวนเงิน','ค่าธรรมเนียม','วันเวลา','บันทึกความจำ'].map(text => ({ text, confidence:.95, classification:'slip_evidence',bounds:{x:1,y:2,width:100,height:20} })),
+  });
+  const summary = summarizeDetectedSlipRecipients([complete('one','ref-1'),record('incomplete','สมชาย ใจดี',10000),complete('copy','ref-1')]);
+  assert.equal(summary.groups[0].totalAmount,10000);
+  assert.equal(summary.groups[0].amountCount,1);
+  assert.equal(summary.groups[0].records.length,3);
+  assert.equal(summary.groups[0].records[2].calculationGate.duplicateOf,'one');
+});
+
 test("groups only exact names after title and whitespace normalization", () => {
   const summary = summarizeDetectedSlipRecipients([
     record("a", "นาย สมชาย  ใจดี", 100),
@@ -29,7 +41,7 @@ test("groups only exact names after title and whitespace normalization", () => {
   ]);
 
   assert.equal(summary.groups.length, 2);
-  assert.equal(summary.groups[0].totalAmount, 300);
+  assert.equal(summary.groups[0].totalAmount, 0); // No nine-component evidence in this fixture.
   assert.equal(summary.groups[0].records.length, 2);
   assert.equal(summary.groups[1].records[0].id, "c");
   assert.equal(summary.detectedSlipCount, 3);
@@ -49,7 +61,7 @@ test("strips repeated title prefixes before grouping OCR names and summing amoun
 
   assert.equal(summary.groups.length, 1);
   assert.equal(summary.groups[0].name, "จิณห์นิภา ประสาทเขตรการ");
-  assert.equal(summary.groups[0].totalAmount, 2050);
+  assert.equal(summary.groups[0].totalAmount, 0);
   assert.deepEqual(summary.groups[0].records.map(({ chatPage, dossierPage }) => ({ chatPage, dossierPage })), [
     { chatPage: "1 / 3", dossierPage: 4 },
     { chatPage: "2 / 3", dossierPage: 5 },
@@ -77,7 +89,7 @@ test("keeps incomplete recipient or amount records visible without inventing tot
   ]);
 
   assert.equal(summary.groups.length, 1);
-  assert.equal(summary.groups[0].totalAmount, 100);
+  assert.equal(summary.groups[0].totalAmount, 0);
   assert.equal(summary.groups[0].records.length, 2);
   assert.deepEqual(summary.groups[0].records[1].missingFields, ["จำนวนเงิน"]);
   assert.equal(summary.unassignedRecords.length, 1);
@@ -164,7 +176,7 @@ test("keeps a slip-supported recipient candidate visible when crop and page OCR 
   assert.equal(summary.unassignedRecords.length, 0);
   assert.equal(summary.groups.length, 1);
   assert.equal(summary.groups[0].name, "จิณห์นิภา ประสาทเขตรการ");
-  assert.equal(summary.groups[0].totalAmount, 3000);
+  assert.equal(summary.groups[0].totalAmount, 0);
   assert.equal(summary.groups[0].records[0].receiverNameNeedsReview, true);
   assert.equal(summary.groups[0].records[0].receiverNameOcrConflict, true);
   assert.equal(summary.groups[0].records[0].isConfirmed, false);
@@ -284,7 +296,7 @@ test("keeps an unreadable-name occurrence pending and offers a name only for an 
 
   assert.equal(summary.groups.length, 1);
   assert.equal(summary.groups[0].records.length, 1);
-  assert.equal(summary.groups[0].totalAmount, 100);
+  assert.equal(summary.groups[0].totalAmount, 0);
   assert.equal(summary.unassignedRecords.length, 2);
   assert.equal(summary.unassignedRecords[0].suggestedRecipientName, "จิณห์นภา ประสาทเขตรการ");
   assert.equal(summary.unassignedRecords[0].suggestedFromOccurrenceId, "named-copy");

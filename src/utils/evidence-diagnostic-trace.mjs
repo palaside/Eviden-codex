@@ -1,3 +1,5 @@
+import { evaluateSlipCalculation, evaluateSlipBatch } from './slip-calculation-gate.mjs';
+
 function stripMaskPreview(trace) {
   if (!trace) return null;
   const { maskPreviews, ...diagnostic } = trace;
@@ -71,6 +73,7 @@ function candidateTrace(candidate, source) {
   }
   return {
     ...record,
+    calculationGate: evaluateSlipCalculation(candidate),
     fieldEvidence,
     fieldConflicts: getFieldConflicts(candidate),
     source,
@@ -188,6 +191,8 @@ export function buildEvidenceDiagnosticTrace(stagedQueue, manifestList, generate
     };
   });
   const candidates = items.flatMap((item) => item.candidates);
+  const calculationGates = evaluateSlipBatch(candidates);
+  candidates.forEach((candidate,index) => { candidate.calculationGate = calculationGates[index]; });
   const fieldCount = (getValue) => candidates.filter((candidate) => getValue(candidate.data)).length;
   const categoryCounts = Object.fromEntries(["CHAT", "SLIP", "PENDING"].map((category) => [
     category,
@@ -208,6 +213,11 @@ export function buildEvidenceDiagnosticTrace(stagedQueue, manifestList, generate
       statusCounts,
       duplicateOccurrences: items.filter((item) => item.isDuplicate).length,
       candidates: candidates.length,
+      calculationEligible: calculationGates.filter(g => g.eligible).length,
+      calculationExcluded: calculationGates.filter(g => !g.eligible && !g.duplicateOf).length,
+      calculationDuplicates: calculationGates.filter(g => g.duplicateOf).length,
+      calculationTotal: calculationGates.some(g => g.eligible) ? calculationGates.reduce((sum,g) => sum + (g.eligible ? g.amount : 0),0) : null,
+      calculationStatus: calculationGates.some(g => g.eligible) ? 'eligible_subset' : 'review_required',
       candidatesConfirmed: candidates.filter((candidate) => candidate.isConfirmed).length,
       candidatesNeedsReview: candidates.filter((candidate) => candidate.needsReview).length,
       amountPresent: fieldCount((data) => data?.transaction?.amount != null),

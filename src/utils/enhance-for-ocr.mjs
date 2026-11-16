@@ -234,3 +234,14 @@ export function enhanceOcrPixels(pixels, width = Math.floor(pixels.length / 4), 
     stages: ["gamma_normalization", "median_denoise", "bilateral_denoise", "clahe_contrast", "unsharp_mask"],
   };
 }
+// A bounded alternative for colored labels. Grayscale text is intentionally
+// omitted, so this must never replace the original or general OCR variant.
+export function separateChromaInk(pixels) {
+  const output = new Uint8ClampedArray(pixels);
+  for (let i = 0; i < output.length; i += 4) {
+    const channels = [pixels[i], pixels[i + 1], pixels[i + 2]];
+    const ink = Math.max(...channels) - Math.min(...channels) > 35 && Math.min(...channels) < 130;
+    output[i] = output[i + 1] = output[i + 2] = ink ? 0 : 255;
+  }
+  return output;
+}

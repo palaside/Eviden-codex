@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "policyVersion": "slip-eight-required-optional-memo.v3",
+  "assessmentSchema": "slip-assessment.schema.json",
+  "scope": "single_slip_occurrence",
+  "requiredScore": 100,
+  "unreadComponentStatus": "unknown",
+  "unknownScore": null,
+  "noEligibleTotal": null,
+  "requirePositiveAmount": true,
+  "deduplicateBy": "transaction.reference_no",
+  "autoHumanConfirmation": false,
+  "components": [
+    { "id": "success", "label": "โอนเงินสำเร็จ", "required": true, "weight": 26, "pattern": "โอนเงินสำเร็จ" },
+    { "id": "reference", "label": "รหัสอ้างอิง", "required": true, "weight": 16, "pattern": "รหัสอ้างอิง" },
+    { "id": "sender", "label": "จาก", "required": true, "weight": 13, "pattern": "(?:^|[\\s©®◉•|])จาก(?:\\s|$)" },
+    { "id": "receiver", "label": "ไปยัง", "required": true, "weight": 12, "pattern": "ไปยัง" },
+    { "id": "amount", "label": "จำนวนเงิน", "required": true, "weight": 11, "pattern": "จำนวนเงิน" },
+    { "id": "fee", "label": "ค่าธรรมเนียม", "required": true, "weight": 9, "pattern": "ค(?:่า|ำ)ธรรมเนียม" },
+    { "id": "datetime", "label": "วันเวลา", "required": true, "weight": 8, "pattern": "(?:วันเวลา|วันที่ทำรายการ|วันที่.*เวลา)" },
+    { "id": "note", "label": "บันทึกความจำ", "required": false, "weight": 0, "bonusWeight": 10.1, "pattern": "(?:บันทึกความจำ|บันทึกช่วยจำ|หมายเหตุ)" },
+    { "id": "qr", "label": "QR Code", "required": true, "weight": 5, "evidenceType": "decoded_qr_payload" }
+  ]
+}

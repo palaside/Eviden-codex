@@ -132,7 +132,9 @@ function mergeMissingQrFields(qr: LocalSlipCandidate, ocr: LocalSlipCandidate, m
   const date = qrData.transaction.date ?? ocrData.transaction.date;
   const time = qrData.transaction.time ?? ocrData.transaction.time;
   const ocrEvidencedBank = ocrData.bank.name || ocrData.sender.bank || null;
-  const bankName = qrData.bank.name && !qrData.bank.name.includes("ตรวจพบ QR e-Slip")
+  const mappedBankProposal = ocrData.warnings.includes("heuristic_entity_extraction_not_exact")
+    && /ธนาคารไม่ระบุ|ไม่ทราบ|ตรวจพบ QR/u.test(qrData.bank.name || "");
+  const bankName = !mappedBankProposal && qrData.bank.name && !qrData.bank.name.includes("ตรวจพบ QR e-Slip")
     ? qrData.bank.name
     : ocrEvidencedBank || qrData.bank.name;
   const receiverName = qrData.receiver.name || ocrData.receiver.name;
@@ -175,6 +177,8 @@ function mergeMissingQrFields(qr: LocalSlipCandidate, ocr: LocalSlipCandidate, m
         time,
         reference_no: referenceNo,
         transaction_id: qrData.transaction.transaction_id ?? ocrData.transaction.transaction_id ?? referenceNo,
+        ...(ocrData.warnings.includes("raw_ocr_copied_to_memo_not_a_verbatim_bank_note")
+          ? { note: ocrData.transaction.note } : {}),
       },
       confidence: {
         ...qrData.confidence,

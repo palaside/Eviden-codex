@@ -78,6 +78,6 @@ function consolidateSameRegionDetections(candidates) {
 
 export function finalizeSlipCandidates(qrCandidates, ocrCandidates) {
   return consolidateSameRegionDetections(combineQrAndOcrSlipCandidates(qrCandidates, ocrCandidates))
-    .map(normalizeSlipCandidateNames)
+    .map(candidate=>candidate.data.warnings?.includes('heuristic_entity_extraction_not_exact')?candidate:normalizeSlipCandidateNames(candidate))
     .map((candidate) => ({ ...candidate, data: applyMissingSlipReviewWarnings(candidate.data) }));
 }

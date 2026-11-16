@@ -2,6 +2,30 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildEvidenceDiagnosticTrace } from "../evidence-diagnostic-trace.mjs";
 
+test('unassessed slips export null total while preserving the observed transaction amount', () => {
+  const report = buildEvidenceDiagnosticTrace([{id:'s',category:'SLIP',data:{ transaction:{amount:10000},raw_text:[] }}],[]);
+  assert.equal(report.statistics.calculationTotal,null);
+  assert.equal(report.statistics.calculationStatus,'review_required');
+  assert.equal(report.items[0].candidates[0].data.transaction.amount,10000);
+  assert.equal(report.items[0].candidates[0].calculationGate.score,null);
+});
+
+test('export uses the same nine-component and duplicate gate as recipient totals', () => {
+  const data = { transaction:{ amount:10000,reference_no:'same-ref' }, raw_text:['0002010102121234567890'] };
+  const boxes = ['โอนเงินสำเร็จ','รหัสอ้างอิง','จาก','ไปยัง','จำนวนเงิน','ค่าธรรมเนียม','วันเวลา','บันทึกความจำ'].map(text => ({ text,classification:'slip_evidence',confidence:.95,bounds:{x:1,y:2,width:100,height:20} }));
+  const report = buildEvidenceDiagnosticTrace([{ id:'source',category:'CHAT',embeddedSlips:[
+    { id:'one',data,ocrTextBoxes:boxes,needsReview:true },
+    { id:'copy',data,ocrTextBoxes:boxes,needsReview:true },
+    { id:'incomplete',data,ocrTextBoxes:[],needsReview:true },
+  ] }], []);
+  assert.equal(report.statistics.calculationTotal,10000);
+  assert.equal(report.statistics.calculationEligible,1);
+  assert.equal(report.statistics.calculationDuplicates,1);
+  assert.equal(report.statistics.calculationExcluded,1);
+  assert.equal(report.items[0].candidates[1].calculationGate.duplicateOf,'one');
+  assert.equal(report.items[0].candidates[0].needsReview,true);
+});
+
 test("exports per-image OCR and QR diagnostics with provenance but without source file bytes", () => {
   const trace = {
     sourceDimensions: { width: 400, height: 800 },

@@ -1,0 +1,90 @@
+/** Same-origin bridge. The user key is read only from the browser vault. */
+import {validateGeminiOcrDocument} from './gemini-ocr-contract.mjs';
+import {readProviderKey} from './ocr-provider-vault.mjs';
+
+export const GEMINI_VAULT_STORAGE_KEY = 'gemini_key';
+export function readGeminiVaultKey() {
+  return readProviderKey('gemini');
+}
+export function writeGeminiVaultKey(value) {
+  if(!globalThis.localStorage)throw new Error('Browser storage is unavailable');
+  const key=value.trim();
+  if(key)globalThis.localStorage.setItem(GEMINI_VAULT_STORAGE_KEY,key);
+  else globalThis.localStorage.removeItem(GEMINI_VAULT_STORAGE_KEY);
+  globalThis.localStorage.removeItem('digital_evi_gemini_api_key');
+}
+
+const errorSubscribers = new Set();
+export function subscribeGeminiBridgeErrors(listener) {
+  errorSubscribers.add(listener);
+  return () => { errorSubscribers.delete(listener); };
+}
+function failure(code, status = null, providerLabel = 'Gemini') {
+  const messages = {
+    GEMINI_QUOTA_EXCEEDED: 'Gemini quota เต็ม (429) หยุดคำขอแล้ว ไม่มีการ retry',
+    GEMINI_TIMEOUT: 'Gemini ใช้เวลานานเกินกำหนด คำขอถูกยกเลิกแล้ว',
+    GEMINI_NOT_CONFIGURED: 'โปรดกรอก API Key ก่อนสกัดรายละเอียด',
+    GEMINI_SCHEMA_MISMATCH: 'Gemini ส่ง JSON ที่ไม่ตรงรูปแบบ จึงไม่ใช้ผลนี้',
+    OCR_INVALID_ENDPOINT: 'Endpoint ต้องเป็น HTTPS ของ Provider ที่เลือก และไม่ใส่คีย์ใน URL',
+    OCR_OUTPUT_MAPPING_REQUIRED: 'Provider คืนข้อความหรือ layout แต่ยังไม่มี field/พิกัดสลิปตามสัญญา ต้องตรวจและเชื่อมตัวแปลงผลก่อน',
+    OCR_MEMO_TOO_LONG: 'ข้อความ OCR เกิน 50,000 ตัวอักษร ระบบไม่ได้ตัดข้อความทิ้ง กรุณาแบ่งเอกสารเพื่อตรวจทาน',
+  };
+  const message = `${(messages[code] || (code==='OCR_PROVIDER_NOT_CONFIGURED'?'ยังไม่ได้เชื่อม inference endpoint สำหรับโมเดลนี้':'สกัดด้วย Gemini ไม่สำเร็จ กรุณาตรวจ server/API')).replaceAll('Gemini',providerLabel)} — review_required`;
+  for (const listener of errorSubscribers) { try { listener(message); } catch { /* Notification must not hide the OCR error. */ } }
+  return {ok:false,error:{code,message,status,retryable:false,reviewStatus:'review_required'}};
+}
+
+export function createGeminiBridgeClient({fetchImpl=(...args)=>globalThis.fetch(...args),timeoutMs=100_000,getApiKey=readGeminiVaultKey,endpoint='/api/ocr/gemini',providerLabel='Gemini',getConfig,validateOutput=validateGeminiOcrDocument} = {}) {
+  return async function fetchFromGeminiBridge(imageBlob, context = {}) {
+  let bitmap;
+  let timeout;
+  try {
+    const config=getConfig?.();
+    const apiKey=(config?.apiKey??getApiKey())?.trim();
+    if(!apiKey)return failure('GEMINI_NOT_CONFIGURED',401,providerLabel);
+    if (!context.width || !context.height) {
+      bitmap = await createImageBitmap(imageBlob);
+      context = {...context, width: bitmap.width, height: bitmap.height};
+    }
+    const body = new FormData();
+    body.set('image', imageBlob, 'ocr-image');
+    body.set('width', String(context.width));
+    body.set('height', String(context.height));
+    if(context.jobKind)body.set('jobKind',context.jobKind);
+    if(config){body.set('provider',config.provider);body.set('endpoint',config.endpoint);body.set('model',config.model);}
+    console.info(`[${providerLabel} OCR] ส่งภาพไป provider`);
+    const controller = new AbortController();
+    timeout = setTimeout(()=>controller.abort(), timeoutMs);
+    const response = await fetchImpl(endpoint, {method: 'POST',headers:{'x-api-key':apiKey}, body, cache: 'no-store',signal:controller.signal});
+    const result = await response.json();
+    if (!response.ok || result?.ok !== true) {
+      console.warn(`[${providerLabel} OCR] คำขอไม่สำเร็จ`, response.status);
+      return failure(result?.error?.code || 'GEMINI_BRIDGE_ERROR',response.status,providerLabel);
+    }
+    validateOutput(result.value,context);
+    console.info(`[${providerLabel} OCR] ได้รับข้อมูลกลับมาแล้ว`);
+    return result;
+  } catch (error) {
+    console.warn(`[${providerLabel} OCR] ติดต่อ bridge หรืออ่าน response ไม่สำเร็จ`);
+    return failure(error?.name === 'AbortError' ? 'GEMINI_TIMEOUT' : error?.code || 'GEMINI_BRIDGE_ERROR',null,providerLabel);
+  } finally { if(timeout)clearTimeout(timeout); bitmap?.close(); }
+  };
+}
+
+export const fetchFromGeminiBridge = createGeminiBridgeClient();
+
+/** Compatibility envelope for the existing explicit Gemini button. */
+export async function fetchGeminiDetectionBridge(file) {
+  const bitmap = await createImageBitmap(file);
+  const size = {width:bitmap.width,height:bitmap.height};
+  bitmap.close();
+  const result = await fetchFromGeminiBridge(file,size);
+  if(!result.ok)return Response.json({success:false,message:result.error.message},{status:result.error.status || 502});
+  const sha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer())),b=>b.toString(16).padStart(2,'0')).join('');
+  return Response.json({success:true,candidates:result.value.slips.map(slip=>({
+    bbox_1000:[slip.bounds.y/size.height*1000,slip.bounds.x/size.width*1000,
+      (slip.bounds.y+slip.bounds.height)/size.height*1000,(slip.bounds.x+slip.bounds.width)/size.width*1000],
+    visual_cues:slip.data.raw_text,data:slip.data,
+  })),metadata:{file_name:file.name,mime_type:file.type,sha256,size_bytes:file.size,
+    extracted_at:new Date().toISOString(),template_mode:'review_only'}});
+}

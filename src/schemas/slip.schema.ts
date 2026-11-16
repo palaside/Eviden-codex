@@ -100,7 +100,7 @@ export const SlipExtractionSchema = z.object({
     note: z
       .string()
       .trim()
-      .max(1000)
+      .max(50000)
       .nullable(),
   }),
 
