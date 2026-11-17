@@ -339,7 +339,8 @@ import { findReferenceMatchGroups } from "@/utils/reference-match-groups.mjs";
 import { buildChatOcrGroups, findChatSlipCorroborationCandidates, getCorroborationBasisLabel } from "@/utils/chat-slip-corroboration.mjs";
 import { countChatPagesWithEmbeddedSlips } from "@/utils/embedded-slip-page-count.mjs";
 import { buildConsistentReviewPacketPayload } from "@/utils/consistent-review-packet.mjs";
-import { formatRecipientReviewStatus, summarizeDetectedSlipRecipients } from "@/utils/slip-recipient-summary";
+import ExtractedSlipGroups from "@/components/ExtractedSlipGroups";
+import { summarizeDetectedSlipRecipients } from "@/utils/slip-recipient-summary";
 import { sliceChatImageLocally } from "@/utils/canvas-dicut-chat";
 import { mapSliceBoundsToSource } from "@/utils/slice-coordinate-map";
 import { mapSourceSlipCandidateToChatSlice } from "@/utils/chat-slip-source-fallback.mjs";
@@ -655,8 +656,7 @@ export default function MasterEvidenceWorkspace() {
   const [selectedSlipRecordId, setSelectedSlipRecordId] = useState<string | null>(null);
   const [aiScanItemId, setAiScanItemId] = useState<string | null>(null);
   const [aiScanMessage, setAiScanMessage] = useState<string | null>(null);
-  const [aiReviewReport,setAiReviewReport]=useState<GeminiReviewReport|null>(null);
-  const visibleGeminiReview=aiReviewReport||stagedQueue[selectedItemIndex]?.ocrDiagnosticTrace?.geminiReview;
+  const visibleGeminiReview=stagedQueue[selectedItemIndex]?.ocrDiagnosticTrace?.geminiReview;
   const exactDuplicateGroups = useMemo(() => findExactFileDuplicateGroups(stagedQueue.map((item) => ({
     id: item.id,
     fileName: item.file.name,
@@ -721,8 +721,12 @@ export default function MasterEvidenceWorkspace() {
     duplicateCount:ledgerReconciliation.duplicateCount }), [storedEvidenceState, ledgerReconciliation]);
   const reviewedDuplicateSummary = useMemo(() => reconcileReviewedDuplicateReferences(projectSlipCalculationRecords(ledgerRecords), duplicateReferenceResolutions), [ledgerRecords, duplicateReferenceResolutions]);
   const slipRecipientSummary = useMemo(
-    () => summarizeDetectedSlipRecipients(ledgerRecords),
-    [ledgerRecords]
+    () => summarizeDetectedSlipRecipients(ledgerRecords, new Map(stagedQueue.flatMap(item => {
+      const report = item.ocrDiagnosticTrace?.geminiReview;
+      const sha256 = item.meta?.sha256;
+      return report && sha256 ? [[item.id, {sha256, report}] as const] : [];
+    }))),
+    [ledgerRecords, stagedQueue]
   );
   const legalSignalHits = useMemo<LegalSignalHit[]>(() => {
     const hits: LegalSignalHit[] = [];
@@ -1117,7 +1121,6 @@ export default function MasterEvidenceWorkspace() {
     if (!item || item.stitchedIntoItemId || (item.status !== "done" && item.status !== "error")) return;
     const engineLabel = engine === "slipvision" ? "SlipVision" : "Gemini";
     setAiScanItemId(itemId);
-    setAiReviewReport(null);
     setAiScanMessage(`กำลังสกัดจาก ${item.file.name} ด้วย ${engineLabel}; ผลจะรอตรวจทาน`);
     try {
       const body = new FormData();
@@ -1143,18 +1146,31 @@ export default function MasterEvidenceWorkspace() {
       if (result.metadata.sha256 !== await computeFileSha256(item.file)) {
         throw new Error("SHA-256 ของภาพที่ API ประมวลผลไม่ตรงกับไฟล์ต้นฉบับ");
       }
-      if(result.geminiReview)setAiReviewReport(result.geminiReview);
+      const review=result.geminiReview;
+      const projectionIssues:GeminiReviewReport['issues']=[];
+      const sourceTrace=()=>createGeminiReviewTrace({...review!,issues:[...review!.issues,...projectionIssues]}) as SlipOcrDiagnosticTrace;
+      const keepSourceReview=()=>{
+        const trace=sourceTrace();
+        setStagedQueue(current=>current.map(entry=>entry.id===itemId?{...entry,ocrDiagnosticTrace:trace}:entry));
+      };
+      if(review)keepSourceReview();
       setErrorMsg(null);
       const bitmap = await createImageBitmap(item.file);
       const sourceWidth = bitmap.width;
       const proposals = result.candidates.flatMap((candidate) => {
         const bounds = projectAiSlipBounds(candidate.bbox_1000, sourceWidth, bitmap.height);
-        if (!bounds || bounds.width < 5 || bounds.height < 5) return [];
+        if (!bounds || bounds.width < 5 || bounds.height < 5) {
+          projectionIssues.push({path:`$.slips[${candidate.sourceIndex}].bounds`,reason:'crop_too_small_or_invalid'});
+          return [];
+        }
         const crop = document.createElement("canvas");
         crop.width = bounds.width;
         crop.height = bounds.height;
         const context = crop.getContext("2d");
-        if (!context) return [];
+        if (!context) {
+          projectionIssues.push({path:`$.slips[${candidate.sourceIndex}]`,reason:'crop_unavailable'});
+          return [];
+        }
         context.drawImage(bitmap, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, bounds.width, bounds.height);
         const template = selectSlipTemplate({ bankName: candidate.data.bank.name, rawText: candidate.data.raw_text });
         const fieldPlan = buildTemplateFieldPlan(template, { width: crop.width, height: crop.height });
@@ -1244,15 +1260,20 @@ export default function MasterEvidenceWorkspace() {
           };
         }
       }
-      if (result.candidates.length > 0 && proposals.length !== result.candidates.length) {
+      if (!review && result.candidates.length > 0 && proposals.length !== result.candidates.length) {
         throw new Error("พิกัดกรอบที่ Gemini ส่งกลับไม่ถูกต้อง; ไม่บันทึกผลบางส่วน");
       }
       if (!proposals.length) {
-        if(result.geminiReview){
-          const trace=createGeminiReviewTrace(result.geminiReview) as SlipOcrDiagnosticTrace;
-          setStagedQueue(current=>current.map(entry=>entry.id===itemId?{...entry,ocrDiagnosticTrace:trace}:entry));
-        }
-        setAiScanMessage(result.geminiReview?.slipAssessments.length?`${engineLabel} อ่านข้อมูลได้ แต่กรอบสลิปยังไม่ผ่าน ตรวจข้อเสนอราย field ด้านล่าง — review_required`:`${engineLabel} ไม่พบสลิปใน ${item.file.name}; ภาพยังอยู่ในคิวและยังต้องตรวจด้วยตา`);
+        if(review)keepSourceReview();
+        setAiScanMessage(review && (review.issues.length || review.slipAssessments.length)?
+          'เก็บผล Gemini แล้ว ยังไม่มีรายการที่ผูกพิกัดกับภาพได้ เปิดผลอ่านและข้อความดิบด้านล่าง — review_required':
+          `${engineLabel} ไม่พบสลิปใน ${item.file.name}; ภาพยังอยู่ในคิวและยังต้องตรวจด้วยตา`);
+        return;
+      }
+      if(review && item.category!=="CHAT" && review.slipAssessments.length>1){
+        projectionIssues.push({path:'$.slips',reason:'multiple_occurrences_in_single_slip_row'});
+        keepSourceReview();
+        setAiScanMessage('Gemini ส่งหลายรายการสำหรับช่องสลิปเดียว เก็บผลแยกรายการให้ตรวจแล้ว ยังไม่รวมยอด');
         return;
       }
       const pagesBefore = stagedQueue.slice(0, stagedQueue.findIndex((entry) => entry.id === itemId))
@@ -1320,6 +1341,10 @@ export default function MasterEvidenceWorkspace() {
             sourceWidth, sourceItemId: entry.id, sourceSegments,
             slices: entry.chatSliceGeometry || [],
           });
+          if (!mapped && review) {
+            projectionIssues.push({path:`$.slips[${occurrenceIndex}].bounds`,reason:'no_matching_chat_page'});
+            continue;
+          }
           if (!mapped) throw new Error("ผูกพิกัดสลิปกับหน้าแชทไม่ได้; ไม่บันทึก candidate ที่ไม่มีหน้าอ้างอิง");
           records.push({
             id: `${entry.id}-gemini-${index + 1}`, extractionVersion: EXTRACTION_VERSION,
@@ -1337,12 +1362,12 @@ export default function MasterEvidenceWorkspace() {
           added += 1;
         }
         return { ...entry, embeddedSlips: records,
-          ...(result.geminiReview?{ocrDiagnosticTrace:createGeminiReviewTrace(result.geminiReview) as SlipOcrDiagnosticTrace}:{}) };
+          ...(review?{ocrDiagnosticTrace:sourceTrace()}:{}) };
       });
       await saveEvidenceQueueSnapshot(serializeEvidenceQueueSnapshot(prepareResearchQueueForPersistence(nextQueue), manifestList));
       setStagedQueue(nextQueue);
       recomputeConfirmedEvidence(nextQueue);
-      setAiScanMessage(`${item.file.name}: เพิ่ม candidate รอตรวจ ${added} รายการ; เติมเฉพาะช่องว่างในรายการเดิม ${updated} รายการ`);
+      setAiScanMessage(`${item.file.name}: เพิ่มรายการรอตรวจ ${added} รายการ; ปรับข้อมูล ${updated} รายการ${projectionIssues.length?' · บางรายการผูกกับหน้าไม่ได้ ดูผลดิบเพื่อตรวจทาน':''}`);
     } catch (error) {
       setAiScanMessage(`สกัดด้วย ${engineLabel} ไม่สำเร็จ: ${error instanceof Error ? error.message : "ข้อผิดพลาดที่ไม่ทราบสาเหตุ"}`);
     } finally {
@@ -4246,253 +4271,9 @@ export default function MasterEvidenceWorkspace() {
               </div>
 
               <div className="glass-nested p-3 rounded-xl border border-sky-400/20 flex flex-col gap-2">
-                <div className="flex items-center justify-between text-[10px] text-slate-400">
-                  <span>สลิปที่ตรวจพบ {slipRecipientSummary.detectedSlipCount} ใบ</span>
-                  <span>ผู้รับที่อ่านได้ {slipRecipientSummary.groups.length} คน</span>
-                </div>
-                {slipRecipientSummary.groups.length > 0 ? (
-                  <div className="max-h-64 overflow-y-auto space-y-1.5 pr-1">
-                    {slipRecipientSummary.groups.map((group) => (
-                      <div key={group.key} className="rounded-lg border border-white/10 bg-black/20">
-                        <div className="flex items-start justify-between gap-2 px-2.5 py-2">
-                          <input
-                            type="checkbox"
-                            aria-label={`เลือก ${pdpaEnabled ? maskPersonName(group.name, true) : group.name} เป็นเป้าหมาย`}
-                            checked={targetList.some((item) => item.selected && item.cleanName.replace(/\s/g, "") === stripThaiTitlePrefix(group.name).replace(/\s/g, ""))}
-                            onChange={() => {
-                              const target = targetList.find((item) => item.cleanName.replace(/\s/g, "") === stripThaiTitlePrefix(group.name).replace(/\s/g, ""));
-                              if (target) toggleTargetPerson(target.id);
-                            }}
-                            className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer accent-sky-500"
-                          />
-                          <span className="min-w-0 flex-1 break-words text-xs font-semibold text-slate-100">
-                            {pdpaEnabled ? maskPersonName(group.name, true) : group.name}
-                            <span className="ml-1.5 text-[10px] font-normal text-slate-400">พบ {group.records.length} · คำนวณ {group.amountCount} · ไม่เข้าเกณฑ์ {group.records.filter(r => !r.calculationGate.eligible && !r.calculationGate.duplicateOf).length} · ซ้ำ {group.records.filter(r => r.calculationGate.duplicateOf).length}</span>
-                          </span>
-                          <span className="shrink-0 text-[11px] font-mono font-bold text-emerald-400">
-                            {group.amountCount > 0
-                              ? `฿${group.totalAmount.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                              : "ยังสรุปยอดไม่ได้"}
-                          </span>
-                        </div>
-                        <div className="space-y-1 border-t border-white/10 px-2.5 py-2">
-                          {group.records.map((record) => (
-                            <div key={record.id} className="text-[10px]">
-                              <div className={record.calculationGate.eligible ? "text-emerald-300" : "text-amber-300"}>
-                                {record.calculationGate.score === null ? "รอตรวจองค์ประกอบ" : `${record.calculationGate.score}/100`} · {record.calculationGate.eligible ? "เข้าเกณฑ์คำนวณ" : "ยังไม่รวมยอด"} · {record.calculationGate.reason}
-                              </div>
-                              <details className="text-slate-300">
-                                <summary className="cursor-pointer">ตรวจเงื่อนไข 9 ข้อ</summary>
-                                {record.calculationGate.components.map((component: { id:string; label:string; status:string }) => <div key={component.id}>{component.label}{component.id === "note" ? " (เสริม ไม่บังคับ)" : ""}: {component.status === "found" ? component.id === "note" ? "พบหลักฐาน · เสริม 10.1" : "พบหลักฐาน" : component.id === "note" ? "ไม่พบข้อมูลเสริม — ไม่ตัดสิทธิ์คำนวณ" : component.status === "absent" ? "ตรวจแล้วว่าไม่มี" : "OCR ยังอ่านไม่ครบ — เปิดภาพตรวจ"}</div>)}
-                              </details>
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="min-w-0 text-slate-300">
-                                  {record.amount !== null
-                                    ? `จำนวนเงิน ฿${record.amount.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                                    : "อ่านจำนวนเงินไม่ได้"}
-                                  {record.missingFields.length > 0 && (
-                                    <span className="ml-1 text-amber-300">
-                                      {`· อ่านไม่ครบ: ${record.missingFields.join(", ")}`}
-                                    </span>
-                                  )}
-                                </div>
-                                <button type="button" onClick={() => openSlipSourcePage(record)} className="shrink-0 text-sky-300 underline">ดูหน้า</button>
-                              </div>
-                              <div className="mt-0.5 text-[9px] text-slate-500">
-                                {record.source} · หน้าแชท {record.chatPage} · หน้าแฟ้ม PDF {record.dossierPage ?? "ไม่มีข้อมูล"}
-                                {record.bounds ? ` · ตำแหน่ง ${record.bounds.x}, ${record.bounds.y}` : ""}
-                              </div>
-                              {formatRecipientReviewStatus(record) && (
-                                <div className="mt-1 text-[9px] text-amber-300">
-                                  {formatRecipientReviewStatus(record)}
-                                </div>
-                              )}
-                              {record.receiverNameOcrConflict && !record.receiverNameManuallyReviewed && (
-                                <div className="mt-1 text-[9px] text-amber-300">
-                                  ชื่อจาก OCR ในกรอบสลิปและทั้งหน้าตรงกัน · รอบอ่านซ้ำต่างกัน · รอตรวจจากภาพ
-                                </div>
-                              )}
-                              {record.ocrRecipientVariants && record.ocrRecipientVariants.length > 1 && (
-                                <div className="mt-1 rounded border border-cyan-300/20 bg-cyan-300/5 px-2 py-1 text-[9px] text-cyan-100">
-                                  <span className="font-semibold">ผล OCR ทุก variant:</span> {record.ocrRecipientVariants.join(" · ")} · ไม่เลือกแทนผู้ใช้
-                                </div>
-                              )}
-                              {record.corroboratedRecipientName && (
-                                <div className="mt-1 flex flex-wrap items-center justify-between gap-2 rounded border border-amber-300/20 bg-amber-300/5 px-2 py-1.5 text-[10px]">
-                                  <span className="min-w-0 text-amber-100">
-                                    ข้อเสนอจากบัญชีปลายทางเดียวกัน (occurrence #{record.corroboratedFromOccurrenceId}): <strong>{pdpaEnabled ? maskPersonName(record.corroboratedRecipientName, true) : record.corroboratedRecipientName}</strong> · รอตรวจทาน
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => updateLedgerRecord(record.id, "receiver_name", record.corroboratedRecipientName!)}
-                                    className="shrink-0 rounded border border-amber-300/30 px-2 py-1 text-amber-100 hover:bg-amber-300/10"
-                                  >ใช้ชื่อเสนอเพื่อตรวจทาน</button>
-                                </div>
-                              )}
-                              {record.data.raw_text?.length ? (
-                                <details className="mt-1 text-[9px] text-slate-400">
-                                  <summary className="cursor-pointer text-sky-300">หลักฐาน OCR ของ candidate · ข้อความ OCR ทั้งหมดและที่มา</summary>
-                                  <pre className="mt-1 whitespace-pre-wrap break-words font-sans">{record.data.raw_text.join("\n")}</pre>
-                                  {record.ocrTextBoxes?.length ? (
-                                    <div className="mt-1 border-t border-white/10 pt-1 font-mono">
-                                      {record.ocrTextBoxes.map((box, boxIndex) => (
-                                        <div key={`${record.id}-ocr-${boxIndex}`}>
-                                          [{box.classification === "slip_evidence" ? "อยู่ในสลิป" : box.classification === "chat_context" ? "บริบทแชท" : box.classification === "uncertain" ? "ไม่แน่ชัด" : "ไม่มีป้ายกำกับ"}] {box.text} · ({box.bounds.x}, {box.bounds.y}, {box.bounds.width}, {box.bounds.height}) · {Math.round(box.confidence * 100)}% · {box.reason || "ไม่มีเหตุผลกำกับ"}
-                                        </div>
-                                      ))}
-                                    </div>
-                                  ) : null}
-                                </details>
-                              ) : null}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : slipRecipientSummary.unassignedRecords.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-white/10 bg-black/20 p-3 text-center text-[11px] italic text-slate-400">
-                    ยังไม่พบรายการสลิปในข้อมูลที่ประมวลผลแล้ว
-                  </div>
-                ) : null}
+                                <ExtractedSlipGroups records={ledgerRecords} sources={stagedQueue} privateNames={pdpaEnabled} openSource={openSlipSourcePage}/>
 
-                {slipRecipientSummary.unassignedRecords.length > 0 && (
-                  <div className="space-y-1.5 border-t border-amber-400/20 pt-2">
-                    <div className="text-[10px] font-semibold text-amber-300">
-                      สลิปที่ชื่อผู้รับยังสรุปไม่ได้ ({slipRecipientSummary.unassignedRecords.length})
-                    </div>
-                    {slipRecipientSummary.unassignedRecords.map((record) => (
-                      <div key={record.id} className="rounded-lg border border-amber-400/20 bg-amber-500/5 px-2.5 py-2">
-                        <div className="text-[10px] text-amber-300">{record.calculationGate.score === null ? "รอตรวจองค์ประกอบ" : `${record.calculationGate.score}/100`} · {record.calculationGate.eligible ? "เข้าเกณฑ์คำนวณ" : "ยังไม่รวมยอด"} · {record.calculationGate.reason}</div>
-                        <div className="flex items-center justify-between gap-2 text-xs">
-                          <span className="font-semibold text-slate-100">
-                            {record.receiverNameNeedsReview
-                              ? "OCR ชื่อผู้รับยังไม่ตรงกัน · ต้องตรวจจากภาพ"
-                              : "ชื่อผู้รับอ่านไม่ได้"}
-                          </span>
-                          <span className="shrink-0 font-mono font-bold text-amber-300">
-                            {record.amount !== null ? `฿${record.amount.toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "ยอดอ่านไม่ได้"}
-                          </span>
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px]">
-                          <label className="text-amber-100" htmlFor={`bank-review-${record.id}`}>ธนาคารที่ผู้ใช้ตรวจ:</label>
-                          <select
-                            id={`bank-review-${record.id}`}
-                            aria-label={`ธนาคารรายการ ${record.id}`}
-                            className="rounded border border-amber-300/30 bg-slate-900/80 px-1.5 py-1 text-amber-100"
-                            value={record.data.bank?.name || ""}
-                            onChange={(event) => updateLedgerRecord(record.id, "bank", event.target.value)}
-                          >
-                            <option value="">ไม่ทราบ/รอตรวจ</option>
-                            <option value="ธนาคารทหารไทยธนชาต">ttb · ธนาคารทหารไทยธนชาต</option>
-                            <option value="ธนาคารกรุงไทย">ธนาคารกรุงไทย</option>
-                            <option value="ธนาคารกสิกรไทย">ธนาคารกสิกรไทย</option>
-                            <option value="ธนาคารไทยพาณิชย์">ธนาคารไทยพาณิชย์</option>
-                            <option value="ธนาคารกรุงเทพ">ธนาคารกรุงเทพ</option>
-                            <option value="ธนาคารกรุงศรีอยุธยา">ธนาคารกรุงศรีอยุธยา</option>
-                            <option value="ธนาคารออมสิน">ธนาคารออมสิน</option>
-                          </select>
-                          <span className="text-[9px] text-amber-300">
-                            {record.bankEvidence?.status === "human_reviewed" ? `มนุษย์เลือก · ${record.bankEvidence.reviewedAt || ""}` : "รอตรวจจากหลักฐาน"}
-                          </span>
-                          {record.bankEvidence?.logoCropDataUrl && <img src={record.bankEvidence.logoCropDataUrl} alt="Bank logo evidence crop" className="max-h-10 max-w-24 rounded border border-amber-300/30 bg-white object-contain" />}
-                        </div>
-                        {record.ocrProposedRecipientName && (
-                          <div className="mt-1 text-[10px] text-amber-100">
-                            OCR เสนอ: <strong>{record.ocrProposedRecipientName}</strong> · รอตรวจจากภาพ
-                          </div>
-                        )}
-                        {record.ocrRecipientVariants && record.ocrRecipientVariants.length > 1 && (
-                          <div className="mt-1 rounded border border-cyan-300/20 bg-cyan-300/5 px-2 py-1 text-[9px] text-cyan-100">
-                            <span className="font-semibold">ผล OCR ทุก variant:</span> {record.ocrRecipientVariants.join(" · ")} · ไม่เลือกแทนผู้ใช้
-                          </div>
-                        )}
-                        {record.suggestedRecipientName && (
-                          <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 rounded border border-amber-300/20 bg-amber-300/5 px-2 py-1.5 text-[10px]">
-                            <span className="min-w-0 text-amber-100">
-                              ข้อเสนอจาก occurrence #{record.suggestedFromOccurrenceId}: <strong>{record.suggestedRecipientName}</strong> · รอตรวจทาน
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => updateLedgerRecord(record.id, "receiver_name", record.suggestedRecipientName!)}
-                              className="shrink-0 rounded border border-amber-300/30 px-2 py-1 text-amber-100 hover:bg-amber-300/10"
-                            >เติมชื่อเพื่อทบทวน</button>
-                          </div>
-                        )}
-                        <div className="mt-1 flex justify-end text-[10px]">
-                          <button type="button" onClick={() => openSlipSourcePage(record)} className="shrink-0 text-sky-300 underline">เปิดหน้าพร้อมชี้ตำแหน่ง</button>
-                        </div>
-                        <div className="mt-0.5 text-[9px] text-slate-500">
-                                {record.source} · หน้าแชท {record.chatPage} · หน้าแฟ้ม PDF {record.dossierPage ?? "ไม่มีข้อมูล"}
-                          {record.bounds ? ` · ตำแหน่ง ${record.bounds.x}, ${record.bounds.y}` : ""}
-                        </div>
-                        {record.data.raw_text?.length || record.ocrDiagnosticTrace ? (
-                          <details className="mt-1 text-[9px] text-slate-400">
-                            <summary className="cursor-pointer text-sky-300">หลักฐาน OCR ของ candidate · ข้อความ OCR ทั้งหมดและที่มา</summary>
-                            <pre className="mt-1 whitespace-pre-wrap break-words font-sans">{(record.data.raw_text || []).join("\n")}</pre>
-                            {record.ocrDiagnosticTrace?.geminiReview && <GeminiReviewDetails report={record.ocrDiagnosticTrace.geminiReview} sourceIndex={record.ocrDiagnosticTrace.geminiSourceIndex}/>}
-                            {record.ocrTextBoxes?.length ? (
-                              <div className="mt-1 border-t border-white/10 pt-1 font-mono">
-                                {record.ocrTextBoxes.map((box, boxIndex) => (
-                                  <div key={`${record.id}-ocr-${boxIndex}`}>
-                                    [{box.classification === "slip_evidence" ? "อยู่ในสลิป" : box.classification === "chat_context" ? "บริบทแชท" : box.classification === "uncertain" ? "ไม่แน่ชัด" : "ไม่มีป้ายกำกับ"}] {box.text} · ({box.bounds.x}, {box.bounds.y}, {box.bounds.width}, {box.bounds.height}) · {Math.round(box.confidence * 100)}% · {box.reason || "ไม่มีเหตุผลกำกับ"}
-                                  </div>
-                                ))}
-                              </div>
-                            ) : null}
-                            {record.fieldCrops?.length ? (
-                              <div className="mt-2 border-t border-fuchsia-300/20 pt-2">
-                                <div className="font-semibold text-fuchsia-200">Field provenance · {record.fieldCrops.length} fields · ทุกค่ารอตรวจทาน</div>
-                                {record.fieldCrops.map((field) => (
-                                  <div key={`${record.id}-field-${field.field}`} className="mt-1 break-words">
-                                    {field.field}: {field.rawOcr || "ไม่มี raw OCR"} · ({field.bounds.x}, {field.bounds.y}, {field.bounds.width}, {field.bounds.height}) · {Math.round((field.confidence ?? 0) * 100)}% · {field.review_status} · SHA {field.cropSha256?.slice(0, 12) || "ไม่มี"}
-                                    {field.alternatives?.length ? ` · ทางเลือก: ${field.alternatives.join(" / ")}` : ""}
-                                  </div>
-                                ))}
-                              </div>
-                            ) : null}
-                            {record.bankEvidence ? (
-                              <div className="mt-2 border-t border-amber-300/20 pt-2">
-                                ธนาคาร evidence: {record.bankEvidence.value || "ยังระบุไม่ได้"} · raw OCR: {record.bankEvidence.rawOcr || "ไม่มี"} · ข้อความ {record.bankEvidence.evidence.text ? "พบ" : "ไม่พบ"} · โลโก้ {record.bankEvidence.evidence.logo ? "พบ" : "ยังไม่ได้ยืนยัน"} · {record.bankEvidence.status}
-                                {record.bankEvidence.logoCropDataUrl && (
-                                  <div className="mt-1 flex items-center gap-2">
-                                    <img src={record.bankEvidence.logoCropDataUrl} alt="Bank evidence crop" className="max-h-12 max-w-40 rounded border border-amber-300/30 bg-white object-contain" />
-                                    <span className="font-mono text-[8px]">SHA {record.bankEvidence.logoCropSha256?.slice(0, 16) || "ไม่มี"}</span>
-                                  </div>
-                                )}
-                              </div>
-                            ) : null}
-                            {record.ocrDiagnosticTrace ? (
-                              <div className="mt-2 border-t border-cyan-300/20 pt-2">
-                                <div className="font-semibold text-cyan-200">Trace OCR · {record.ocrDiagnosticTrace.sourceDimensions.width}×{record.ocrDiagnosticTrace.sourceDimensions.height}</div>
-                                <div>QR {record.ocrDiagnosticTrace.qrBounds.length} · วัตถุ {record.ocrDiagnosticTrace.objectBounds.length} · OCR attempts {record.ocrDiagnosticTrace.attempts.length} · parsed regions {record.ocrDiagnosticTrace.regions.length}</div>
-                                <div data-testid="searchable-text-overlay" className="text-emerald-200">Searchable text overlay · {record.ocrTextBoxes?.length || 0} boxes · พิกัดอ้างอิงจากต้นฉบับ</div>
-                                {record.ocrDiagnosticTrace.imageArtifacts?.length ? (
-                                  <div data-testid="enhancement-artifacts" className="text-fuchsia-200">Enhancement artifacts · {record.ocrDiagnosticTrace.imageArtifacts.length} ภาพ · derived-only</div>
-                                ) : null}
-                                {record.ocrDiagnosticTrace.attempts.map((attempt) => (
-                                  <div key={`${record.id}-${attempt.id}`} className="mt-1 border-l border-cyan-300/30 pl-2">
-                                    {attempt.scope}/{attempt.trigger} · confidence {Math.round(attempt.meanConfidence)}% · {attempt.lines.length} lines
-                                    {attempt.lines.filter((line) => /8\s*,?\s*000(?:\.00)?|แปดพัน|จิณห์|ประสาท|ณัฐชัย|สุวิชัย/u.test(line.text)).map((line) => (
-                                      <div key={line.id} className="break-words">{line.text} · ({Math.round(line.bounds.x)}, {Math.round(line.bounds.y)}, {Math.round(line.bounds.width)}, {Math.round(line.bounds.height)}) · {Math.round(line.confidence)}%</div>
-                                    ))}
-                                  </div>
-                                ))}
-                                {record.ocrDiagnosticTrace.regions.map((region, index) => (
-                                  <div key={`${record.id}-region-${index}`} className="mt-1">
-                                    Region {index + 1} · {region.acceptedByCandidatePolicy ? "รวมเป็น candidate" : "ถูก policy filter ตัดออก"} · ยอด {region.amount ?? "ไม่พบ"} · ผู้โอน {region.senderName || "ไม่พบ"} · ผู้รับ {region.receiverName || "ไม่พบ"} · {region.reason}
-                                  </div>
-                                ))}
-                              </div>
-                            ) : null}
-                          </details>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                <div className="border-t border-white/10 pt-2 text-[10px] font-semibold text-slate-300">
+<div className="border-t border-white/10 pt-2 text-[10px] font-semibold text-slate-300">
                   รายชื่อบุคคลที่เลือกตรวจรายการ
                 </div>
                 {targetList.length === 0 ? (

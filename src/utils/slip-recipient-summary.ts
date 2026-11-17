@@ -1,6 +1,6 @@
 import { removeThaiTitlePrefix } from "./recipient-name-normalization.mjs";
 import { evaluateSlipBatch } from "./slip-calculation-gate.mjs";
-import type { SlipOcrDiagnosticTrace, SlipOcrTraceBounds } from "../types/slip-ocr-trace";
+import type { GeminiReviewReport, SlipOcrDiagnosticTrace, SlipOcrTraceBounds } from "../types/slip-ocr-trace";
 import type { EmbeddedSlipRecord } from "../types/embedded-slip";
 
 export interface DetectedSlipRecipientRecord {
@@ -38,6 +38,7 @@ export interface DetectedSlipRecipientRecord {
 }
 
 export interface SlipRecipientSummaryRecord extends DetectedSlipRecipientRecord {
+  amountReviewHint?: string;
   calculationGate: ReturnType<typeof evaluateSlipBatch>[number];
   amount: number | null;
   missingFields: string[];
@@ -72,7 +73,7 @@ export function formatRecipientReviewStatus(record: SlipRecipientSummaryRecord):
     : "ผู้ใช้แก้/กรอกชื่อแล้ว · รอตรวจยืนยัน";
 }
 
-export function summarizeDetectedSlipRecipients(records: DetectedSlipRecipientRecord[]) {
+export function summarizeDetectedSlipRecipients(records: DetectedSlipRecipientRecord[], sourceReviews = new Map<string, {sha256: string; report: GeminiReviewReport}>()) {
   const gates = evaluateSlipBatch(records);
   const groups = new Map<string, SlipRecipientGroup>();
   const unassignedRecords: SlipRecipientSummaryRecord[] = [];
@@ -140,6 +141,20 @@ export function summarizeDetectedSlipRecipients(records: DetectedSlipRecipientRe
     const amount = typeof rawAmount === "number" && Number.isFinite(rawAmount) && rawAmount >= 0
       ? rawAmount
       : null;
+    let amountReviewHint: string | undefined;
+    const sourceReview = sourceReviews.get(record.sourceItemId);
+    const ref = record.data.transaction?.reference_no;
+    if (amount === null && sourceReview && record.sha256 && record.sha256 === sourceReview.sha256 && ref?.trim()
+        && records.filter(row => row.sourceItemId === record.sourceItemId && row.data.transaction?.reference_no === ref).length === 1) {
+      const matches = sourceReview.report.slipAssessments.filter(slip => slip.fieldAssessments.reference_no?.value === ref);
+      const match = matches.length === 1 ? matches[0] : undefined;
+      const proposed = match?.fieldAssessments.amount?.value;
+      if (match && typeof proposed === "number" && Number.isFinite(proposed) && proposed > 0) {
+        const outside = sourceReview.report.issues.some(issue => issue.path === `$.slips[${match.sourceIndex}].bounds` && issue.reason === "outside_source_or_slip");
+        const reason = outside ? "กรอบสลิปเกินขอบภาพ" : "ยังไม่มีหลักฐานพิกัดยืนยันยอดของรายการนี้";
+        amountReviewHint = `Gemini อ่านได้ ${proposed.toLocaleString("th-TH",{minimumFractionDigits:2,maximumFractionDigits:2})} บาท · ${reason} · รอตรวจเทียบ`;
+      }
+    }
     const missingFields = [
       ...(extractedName ? [] : ["ชื่อผู้รับ"]),
       ...(amount === null ? ["จำนวนเงิน"] : []),
@@ -148,6 +163,7 @@ export function summarizeDetectedSlipRecipients(records: DetectedSlipRecipientRe
       ...record,
       calculationGate: gates[records.indexOf(record)],
       amount,
+      amountReviewHint,
       missingFields,
       receiverNameNeedsReview,
       receiverNameOcrConflict,

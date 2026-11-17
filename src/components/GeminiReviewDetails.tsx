@@ -14,6 +14,7 @@ export default function GeminiReviewDetails({report,sourceIndex}:{report:GeminiR
         </div>)}
       </div>)}
       {report.issues.map((issue,index)=><div key={index}>{issue.path}: {issue.reason}</div>)}
+      <details><summary>ดูข้อความดิบที่ Gemini ส่งกลับ</summary><pre className="whitespace-pre-wrap break-all">{report.rawResponseText}</pre></details>
     </div>
   </details>;
 }

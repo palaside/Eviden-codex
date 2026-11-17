@@ -11,12 +11,16 @@ const isObject=value=>value!==null&&typeof value==='object'&&!Array.isArray(valu
 const confidence=value=>Number.isFinite(value)&&value>=0&&value<=1;
 const blank=()=>({document_type:'bank_transfer_slip',bank:{name:null,confidence:0},transaction:{date:null,time:null,amount:null,currency:'THB',fee:null,reference_no:null,transaction_id:null,note:null},
   sender:{name:null,bank:null,account_no:null},receiver:{name:null,bank:null,account_no:null},confidence:Object.fromEntries(confidenceFields.map(key=>[key,0])),raw_text:[],warnings:[]});
-const fail=()=>{throw new GeminiOcrError('GEMINI_SCHEMA_MISMATCH','Invalid Gemini review envelope; human review required');};
+const reject=(code)=>{throw new GeminiOcrError(code,'Gemini review could not be attached safely');};
+const checkText=text=>{
+  if(typeof text!=='string')reject('GEMINI_REVIEW_TEXT_MISSING');
+  if(text.length>MAX_RAW)reject('GEMINI_RESPONSE_LIMIT');
+};
 
 export function assessGeminiOcrDocument(rawDocument,{width,height,rawResponseText}={}){
-  if(!Number.isSafeInteger(width)||width<1||!Number.isSafeInteger(height)||height<1||!isObject(rawDocument)||!Array.isArray(rawDocument.slips)||rawDocument.slips.length>20)fail();
+  if(!Number.isSafeInteger(width)||width<1||!Number.isSafeInteger(height)||height<1)reject('GEMINI_SOURCE_MISMATCH');
   const rawText=rawResponseText??JSON.stringify(rawDocument);
-  if(typeof rawText!=='string'||rawText.length>MAX_RAW)fail();
+  checkText(rawText);
   const issues=[];
   const issue=(path,reason)=>{issues.push({path,reason});};
   function boundsValid(bounds,path,container={x:0,y:0,width,height}){
@@ -29,8 +33,9 @@ export function assessGeminiOcrDocument(rawDocument,{width,height,rawResponseTex
   }
   function linesOf(lines,path,container,evidence=false){
     if(!Array.isArray(lines)){issue(path,'missing_lines');return [];}
-    if(lines.length>(evidence?2000:5000))fail();
-    return lines.flatMap((line,index)=>{
+    const limit=evidence?2000:5000;
+    if(lines.length>limit)issue(path,`assessment_limit_${limit}_remaining_in_raw`);
+    return lines.slice(0,limit).flatMap((line,index)=>{
       const at=`${path}[${index}]`;
       if(!isObject(line)||typeof line.text!=='string'||!line.text.trim()||!confidence(line.confidence)){issue(at,'invalid_text_or_confidence');return [];}
       if(!boundsValid(line.bounds,`${at}.bounds`,container))return [];
@@ -42,9 +47,12 @@ export function assessGeminiOcrDocument(rawDocument,{width,height,rawResponseTex
       return [normalized];
     });
   }
-  const pageLines=linesOf(rawDocument.pageLines,'$.pageLines');
+  const pageLines=linesOf(rawDocument?.pageLines,'$.pageLines');
   const slips=[],slipAssessments=[];
-  rawDocument.slips.forEach((source,sourceIndex)=>{
+  const sources=rawDocument?.slips;
+  if(!Array.isArray(sources))issue('$.slips','unrecognized_slip_structure');
+  if(Array.isArray(sources)&&sources.length>20)issue('$.slips','assessment_limit_20_remaining_in_raw');
+  (Array.isArray(sources)?sources.slice(0,20):[]).forEach((source,sourceIndex)=>{
     const at=`$.slips[${sourceIndex}]`;
     const assessment={sourceIndex,candidate:null,fieldAssessments:{},issues:[]};
     const start=issues.length;
@@ -88,7 +96,14 @@ export function assessGeminiOcrDocument(rawDocument,{width,height,rawResponseTex
       // Keep every issue in the trace, not the legacy bounded warnings array.
       data.warnings=['review_required',`${assessment.issues.length} field/evidence issues; see Gemini review trace`];
       // Validate sanitized canonical data before attaching review-only metadata.
-      validateGeminiOcrDocument({slips:[{data,bounds:slipBounds,ocrTextBoxes:boxes}],pageLines:[]},{width,height});
+      try{validateGeminiOcrDocument({slips:[{data,bounds:slipBounds,ocrTextBoxes:boxes}],pageLines:[]},{width,height});}
+      catch(error){
+        if(!(error instanceof GeminiOcrError))throw error;
+        issue(at,'candidate_not_eligible_for_ledger');
+        assessment.issues=issues.slice(start);
+        slipAssessments.push(assessment);
+        return;
+      }
       data._fallback_meta={needs_human_review:true,unclear_fields:Object.entries(assessment.fieldAssessments).filter(([,entry])=>entry.status!=='supported').map(([field])=>field)};
       const candidate={sourceIndex,data,bounds:slipBounds,ocrTextBoxes:boxes};
       assessment.candidate=candidate;slips.push(candidate);
@@ -100,9 +115,10 @@ export function assessGeminiOcrDocument(rawDocument,{width,height,rawResponseTex
 
 export function validateGeminiReviewOutput(value,context){
   if(value?.format!==GEMINI_REVIEW_FORMAT)return validateGeminiOcrDocument(value,context);
-  if(value.sourceDimensions?.width!==context.width||value.sourceDimensions?.height!==context.height||typeof value.rawResponseText!=='string'||value.rawResponseText.length>MAX_RAW)fail();
+  if(value.sourceDimensions?.width!==context.width||value.sourceDimensions?.height!==context.height)reject('GEMINI_SOURCE_MISMATCH');
+  checkText(value.rawResponseText);
   let raw;
-  try{raw=JSON.parse(value.rawResponseText);}catch{fail();}
+  try{raw=JSON.parse(value.rawResponseText);}catch{reject('GEMINI_INVALID_JSON');}
   // Recompute from the immutable provider text rather than trust transported proposals.
   return assessGeminiOcrDocument(raw,{...context,rawResponseText:value.rawResponseText});
 }

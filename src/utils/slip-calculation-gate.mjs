@@ -53,7 +53,7 @@ export function evaluateSlipCalculation(record) {
   const memo = components.find(c => c.id === 'note');
   const result = { policyVersion:policy.policyVersion, score, bonusScore:memo.found ? memo.bonusWeight : 0, assessmentStatus:regionInvalid ? 'region_invalid' : complete ? 'complete' : 'unknown', components, missing,
     amount:validAmount ? amount : null, eligible:complete && validAmount,
-    reason:regionInvalid ? 'กรอบสลิปไม่ผ่าน — ต้องตรวจกรอบก่อนประเมิน' : !complete ? `OCR ยังอ่านองค์ประกอบไม่ครบ: ${missing.join(', ')} — รอตรวจภาพ ไม่ได้ยืนยันว่าองค์ประกอบหาย` : !validAmount ? 'อ่านจำนวนเงินไม่ได้' : 'ครบ 100 คะแนน',
+    reason:regionInvalid ? 'กรอบสลิปไม่ผ่าน — ต้องตรวจกรอบก่อนประเมิน' : !complete ? `OCR ยังอ่านองค์ประกอบไม่ครบ: ${missing.join(', ')} — รอตรวจภาพ ไม่ได้ยืนยันว่าองค์ประกอบหาย` : !validAmount ? 'พบองค์ประกอบครบ แต่รายการยังไม่มียอดสำหรับคำนวณ' : 'ครบ 100 คะแนน',
     reviewStatus:record.isConfirmed ? 'human_reviewed' : 'review_required' };
   const errors = validateSlipAssessment(result);
   if (errors.length) throw new Error(`Invalid slip assessment: ${errors.join(',')}`);

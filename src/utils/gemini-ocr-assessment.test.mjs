@@ -3,6 +3,30 @@ import assert from 'node:assert/strict';
 import {assessGeminiOcrDocument,validateGeminiReviewOutput,createGeminiReviewTrace,mergeGeminiReviewedCandidate} from './gemini-ocr-assessment.mjs';
 
 const context={width:200,height:300};
+test('unrecognized valid JSON is available verbatim for review after revalidation; no ledger candidate',()=>{
+  for(const raw of [{bank:'Krungthai',amount:'13,500.00'},[],null,'OCR text',{slips:{}}]){
+    const text=JSON.stringify(raw,null,2);
+    const report=validateGeminiReviewOutput(assessGeminiOcrDocument(raw,{...context,rawResponseText:text}),context);
+    assert.equal(report.rawResponseText,text);
+    assert.equal(report.reviewStatus,'review_required');
+    assert.deepEqual(report.slips,[]);
+    assert.ok(report.issues.some(issue=>issue.reason==='unrecognized_slip_structure'));
+  }
+});
+test('bounded assessment retains every raw occurrence and assesses unaffected entries',()=>{
+  const raw=syntheticDocument();
+  raw.pageLines=Array(5001).fill(null);
+  raw.slips.push(...Array(20).fill(null));
+  const report=assessGeminiOcrDocument(raw,context);
+  assert.equal(report.slips[0].data.transaction.amount,7200);
+  assert.equal(JSON.parse(report.rawResponseText).slips.length,21);
+  assert.ok(report.issues.some(issue=>issue.path==='$.slips'&&issue.reason.includes('limit')));
+});
+test('excessive response size and mismatched dimensions fail with distinct causes',()=>{
+  assert.throws(()=>assessGeminiOcrDocument({}, {...context,rawResponseText:' '.repeat(2000001)}),{code:'GEMINI_RESPONSE_LIMIT'});
+  const report=assessGeminiOcrDocument(syntheticDocument(),context);
+  assert.throws(()=>validateGeminiReviewOutput(report,{...context,width:199}),{code:'GEMINI_SOURCE_MISMATCH'});
+});
 export function syntheticDocument(){
   const bounds={x:10,y:10,width:180,height:260};
   return {pageLines:[{text:'chat',confidence:.8,bounds:{x:0,y:-1,width:40,height:10}}],slips:[{

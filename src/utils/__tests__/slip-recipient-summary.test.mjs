@@ -21,6 +21,21 @@ const record = (id, name, amount, overrides = {}) => ({
   ...overrides,
 });
 
+test('source amount proposal explains a missing row amount without counting it or attaching it to ambiguous rows', () => {
+  const row = record('one', 'ชื่อทดสอบ', null);
+  row.data.transaction.reference_no = 'SAME';
+  const slip = {sourceIndex:0,fieldAssessments:{amount:{value:13500},reference_no:{value:'SAME'}}};
+  const report = {slipAssessments:[slip],issues:[{path:'$.slips[0].bounds',reason:'outside_source_or_slip'}]};
+  const reviews = new Map([[row.sourceItemId,{sha256:row.sha256,report}]]);
+  const group = summarizeDetectedSlipRecipients([row], reviews).groups[0];
+  assert.match(group.records[0].amountReviewHint,/13,500\.00 บาท · กรอบสลิปเกินขอบภาพ/);
+  assert.equal(group.records[0].amount,null);
+  assert.equal(group.amountCount,0);
+  for(const records of [[row,{...row,id:'copy'}],[{...row,sha256:'other'}]]){
+    assert.equal(summarizeDetectedSlipRecipients(records,reviews).groups[0].records[0].amountReviewHint,undefined);
+  }
+});
+
 test('recipient total excludes incomplete pages and duplicate transactions', () => {
   const complete = (id, ref) => record(id, 'สมชาย ใจดี', 10000, {
     data: { receiver: { name:'สมชาย ใจดี' }, transaction:{ amount:10000, reference_no:ref }, raw_text:['0002010102121234567890'] },
