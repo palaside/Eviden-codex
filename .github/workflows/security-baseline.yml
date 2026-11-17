@@ -38,6 +38,54 @@ jobs:
           cache: npm
       - run: npm audit --omit=dev --json
 
+  dev-dependency-audit-monitor:
+    name: Dev dependency audit monitor (non-blocking)
+    # Dev-tool advisories are tracked separately until a compatible upstream fix exists.
+    # This job is never part of a pull request or push merge gate.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Record development dependency audit
+        shell: bash
+        run: |
+          set +e
+          npm audit --include=dev --json > dev-dependency-audit.json
+          audit_exit=$?
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            let report;
+            try {
+              report = JSON.parse(readFileSync("dev-dependency-audit.json", "utf8"));
+            } catch (error) {
+              report = { error: String(error) };
+            }
+            const counts = report.metadata?.vulnerabilities;
+            console.log("## Development dependency audit (monitor only)");
+            if (counts) {
+              console.log(`- Critical: ${counts.critical}`);
+              console.log(`- High: ${counts.high}`);
+              console.log(`- Moderate: ${counts.moderate}`);
+              console.log(`- Low: ${counts.low}`);
+              console.log(`- Total: ${counts.total}`);
+            } else {
+              console.log("- Audit report could not be parsed; inspect the attached JSON artifact.");
+            }
+            console.log("- Policy: recorded for Issue #1 follow-up; does not block pull requests or main merges.");
+          ' >> "$GITHUB_STEP_SUMMARY"
+          echo "npm audit exit code: $audit_exit (recorded only; this monitor exits successfully)." >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dev-dependency-audit-${{ github.run_id }}
+          path: dev-dependency-audit.json
+          retention-days: 30
+
   source-security:
     name: Source security
     runs-on: ubuntu-latest
