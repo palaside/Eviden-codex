@@ -1,0 +1,13 @@
+title = "Digital Evidence source-only secret scanning policy"
+
+[allowlist]
+description = "Evidence, derived outputs, OCR models, and build results are not source-code scan targets."
+paths = [
+  '''(?i)^For Test/''',
+  '''(?i)^For Test Results/''',
+  '''(?i)^evidence_store/''',
+  '''(?i)^RAW/''',
+  '''(?i)^public/ocr/''',
+  '''(?i)^build-output.*/''',
+  '''(?i)^\.next/''',
+]

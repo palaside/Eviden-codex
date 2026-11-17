@@ -1,0 +1,28 @@
+paths:
+  exclude:
+    - For Test/**
+    - For Test Results/**
+    - evidence_store/**
+    - RAW/**
+    - public/ocr/**
+    - build-output*/**
+    - .next/**
+
+rules:
+  - id: no-console-log-api-key
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: "Do not log API keys, authorization values, or vault credentials."
+    patterns:
+      - pattern-either:
+          - pattern: console.log(..., $SECRET, ...)
+          - pattern: console.error(..., $SECRET, ...)
+      - metavariable-regex:
+          metavariable: $SECRET
+          regex: (?i).*(api.?key|authorization|bearer|token|secret).*
+
+  - id: no-dangerous-html-in-evidence-ui
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "Evidence text must not be rendered through dangerouslySetInnerHTML without an explicit reviewed sanitizer."
+    pattern: <... dangerouslySetInnerHTML={$VALUE} ... />
