@@ -80,7 +80,7 @@ jobs:
           ' >> "$GITHUB_STEP_SUMMARY"
           echo "npm audit exit code: $audit_exit (recorded only; this monitor exits successfully)." >> "$GITHUB_STEP_SUMMARY"
           exit 0
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dev-dependency-audit-${{ github.run_id }}
           path: dev-dependency-audit.json
