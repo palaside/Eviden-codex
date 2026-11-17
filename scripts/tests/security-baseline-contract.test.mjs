@@ -45,6 +45,7 @@ test("security baseline keeps source-only scanners and required checks configure
     "gitleaks/gitleaks-action",
     "semgrep/semgrep-action",
     "npm audit --omit=dev --json",
+    "npx next typegen",
     "npx tsc --noEmit",
     "npm run lint -- --quiet",
     "contents: read",
