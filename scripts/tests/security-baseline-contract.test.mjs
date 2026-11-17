@@ -45,6 +45,10 @@ test("security baseline keeps source-only scanners and required checks configure
     "gitleaks/gitleaks-action",
     "semgrep/semgrep-action",
     "npm audit --omit=dev --json",
+    "dev-dependency-audit-monitor",
+    "npm audit --include=dev --json",
+    "dev-dependency-audit.json",
+    "actions/upload-artifact",
     "npx next typegen",
     "npx tsc --noEmit",
     "npm run lint -- --quiet",
@@ -62,6 +66,11 @@ test("security baseline keeps source-only scanners and required checks configure
   assert.match(dependabot, /package-ecosystem:\s*["']github-actions["']/);
   assert.match(dependabot, /open-pull-requests-limit:\s*3/);
   assert.equal(packageJson.scripts["security:baseline"], "node --test scripts/tests/security-baseline-contract.test.mjs && npm audit --omit=dev");
+  assert.match(
+    workflow,
+    /github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'/,
+    "dev dependency audit monitor must run only on the weekly schedule or manual dispatch",
+  );
 });
 
 test("runtime dependencies meet the audited minimum patched versions", () => {
