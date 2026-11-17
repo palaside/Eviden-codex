@@ -942,6 +942,52 @@ export default function MasterEvidenceWorkspace() {
       }));
     return findChatSlipCorroborationCandidates({ slips, chatPages, visualMatches });
   }, [ledgerRecords, perceptualHashes, stagedQueue]);
+  const timelineCandidateEntries = useMemo(() => chatSlipCorroborationCandidates
+    .flatMap((candidate) => {
+      const record = ledgerRecords.find((item) => item.id === candidate.slipId);
+      if (!record) return [];
+      const chatSource = candidate.chatSourceItemId
+        ? stagedQueue.find((item) => item.id === candidate.chatSourceItemId)
+        : undefined;
+      const chatPage = chatSource?.chatEvidenceLayers?.find((page) => page.pageNumber === candidate.chatPageNumber);
+      const excludedRegions = chatSource && chatPage
+        ? (chatSource.embeddedSlips || [])
+          .filter((embedded) => embedded.chatPageNumber === chatPage.pageNumber)
+          .map((embedded) => ({ sourceItemId: embedded.sourceItemId, bounds: embedded.sourceBounds }))
+        : [];
+      const chatGroup = chatPage
+        ? buildChatOcrGroups(chatPage.layer2, excludedRegions, chatPage.layer1)
+          .find((group) => group.groupId === candidate.groupId)
+        : undefined;
+      const chatSliceIndex = chatSource && typeof candidate.chatPageNumber === "number"
+        ? chatSource.chatStreamPageNumbers?.indexOf(candidate.chatPageNumber) ?? -1
+        : -1;
+      const chatImage = chatSliceIndex >= 0 ? chatSource?.chatSlices?.[chatSliceIndex] : undefined;
+      const slipDate = record.data.transaction.date || "";
+      const slipTime = record.data.transaction.time || "";
+      const slipTimestamp = slipDate && slipTime
+        ? Date.parse(`${slipDate}T${slipTime.length === 5 ? `${slipTime}:00` : slipTime}Z`)
+        : Number.NaN;
+      const chatTimestamp = chatGroup?.eventTimestamp ? Date.parse(chatGroup.eventTimestamp) : Number.NaN;
+      const orderTimestamp = Math.min(
+        Number.isFinite(slipTimestamp) ? slipTimestamp : Number.POSITIVE_INFINITY,
+        Number.isFinite(chatTimestamp) ? chatTimestamp : Number.POSITIVE_INFINITY,
+      );
+      return [{
+        candidate,
+        record,
+        chatSource,
+        chatImage,
+        chatTimestampLabel: chatGroup?.eventTimestamp || "",
+        chatText: chatGroup?.lines.join(" ") || candidate.evidenceText || "",
+        slipDate,
+        slipTime,
+        slipTimestamp,
+        orderTimestamp,
+      }];
+    })
+    .sort((left, right) => left.orderTimestamp - right.orderTimestamp),
+  [chatSlipCorroborationCandidates, ledgerRecords, stagedQueue]);
   const chatPagesWithEmbeddedSlips = useMemo(
     () => countChatPagesWithEmbeddedSlips(stagedQueue),
     [stagedQueue],
@@ -4746,6 +4792,25 @@ export default function MasterEvidenceWorkspace() {
           </div>
 
           <div className="panel-scroll-body thai-clearance-stack pr-1 flex flex-col gap-3">
+            <button
+              onClick={() => setLinkageModalOpen(true)}
+              className="btn-proportional-primary glass-button w-full justify-between items-center text-xs py-2 px-3 rounded-lg border border-emerald-400/30 hover:border-emerald-400/60 bg-emerald-950/25 hover:bg-emerald-900/35 transition-all shadow-sm text-left group"
+              title="เปิด Timeline จากข้อเสนอการเชื่อมโยงของ OCR โดยไม่ยืนยันความสัมพันธ์อัตโนมัติ"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-sm shrink-0 group-hover:scale-110 transition-transform">🕒</span>
+                <div className="flex flex-col min-w-0">
+                  <span className="font-semibold text-emerald-300 truncate">Timeline</span>
+                  <span className="text-[9.5px] text-slate-400 leading-tight truncate">
+                    ลำดับเหตุการณ์และหลักฐานที่เกี่ยวข้อง · รอตรวจทาน
+                  </span>
+                </div>
+              </div>
+              <span className="text-[10px] font-mono text-emerald-300 bg-emerald-500/20 px-1.5 py-0.5 rounded border border-emerald-400/30 shrink-0 ml-1">
+                {chatSlipCorroborationCandidates.length} จุด ↗
+              </span>
+            </button>
+
             {/* =================================================================
                 LAYER 1: 4 KPI CARDS (2x2 Grid)
                 1. ยอดเงินรวมที่ตรวจพบ
@@ -4872,28 +4937,10 @@ export default function MasterEvidenceWorkspace() {
                   <span className="font-semibold text-slate-100">ตารางสรุปหลักฐาน</span>
                 </div>
                 <span className="text-[10px] font-mono text-sky-300 bg-sky-500/20 px-1.5 py-0.5 rounded border border-sky-400/30">
-                  13 คอลัมน์ ↗
+                  11 คอลัมน์ ↗
                 </span>
               </button>
 
-              <button
-                onClick={() => setLinkageModalOpen(true)}
-                className="btn-proportional-primary glass-button w-full justify-between items-center text-xs py-2 px-3 rounded-lg border border-emerald-400/30 hover:border-emerald-400/60 bg-emerald-950/25 hover:bg-emerald-900/35 transition-all shadow-sm text-left group"
-                title="แสดงข้อเสนอการเชื่อมโยงจาก OCR ระหว่างหน้าแชทกับรายการสลิป เพื่อให้ตรวจทาน"
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-sm shrink-0 group-hover:scale-110 transition-transform">🔗</span>
-                  <div className="flex flex-col min-w-0">
-                    <span className="font-semibold text-emerald-300 truncate">ตรวจสอบความเชื่อมโยง</span>
-                    <span className="text-[9.5px] text-slate-400 leading-tight truncate">
-                      (ข้อเสนอจาก OCR · รอตรวจทานก่อนยืนยัน)
-                    </span>
-                  </div>
-                </div>
-                <span className="text-[10px] font-mono text-emerald-300 bg-emerald-500/20 px-1.5 py-0.5 rounded border border-emerald-400/30 shrink-0 ml-1">
-                  Linkage ↗
-                </span>
-              </button>
             </div>
 
             {/* =================================================================
@@ -5651,8 +5698,7 @@ export default function MasterEvidenceWorkspace() {
       )}
 
       {/* =====================================================================
-          โมดูลที่ 3: ตรวจสอบความเชื่อมโยง (Cross-Reference Linkage Modal)
-          (สรุปการจับคู่ลำดับหน้าจากไฟล์ PDF ที่มีสลิปแปะไว้ คู่กับ ลำดับของสลิป จาก PDF)
+          โมดูลที่ 3: Timeline หลักฐาน (Cross-Reference Linkage Modal)
           ===================================================================== */}
       {linkageModalOpen && (
         <div className="absolute inset-0 glass-modal-backdrop z-50 flex items-center justify-center p-4">
@@ -5663,10 +5709,10 @@ export default function MasterEvidenceWorkspace() {
                 <span className="text-xl">🔗</span>
                 <div>
                   <h3 className="font-bold text-sm text-slate-100">
-                    ข้อเสนอการเชื่อมโยงแชทกับสลิปจาก OCR
+                    Timeline · ลำดับเหตุการณ์และหลักฐานที่เกี่ยวข้อง
                   </h3>
                   <span className="text-[11px] text-emerald-400 font-mono">
-                    แสดง candidate จาก Ref, ยอด/คำโอน หรือยอด/ข้อความกู้ยืมที่ต้องตรวจทาน
+                    ข้อเสนอจาก OCR เพื่อให้ตรวจหลักฐานต้นทาง · ไม่ใช่ข้อยืนยันความสัมพันธ์
                   </span>
                 </div>
               </div>
@@ -5718,100 +5764,90 @@ export default function MasterEvidenceWorkspace() {
                 {corroborationPacketStatus && <span role="status" className="w-full text-[10px] text-sky-200">{corroborationPacketStatus}</span>}
               </div>
 
-              {/* Linkage Pair Table */}
-              <div className="border border-white/10 rounded-xl overflow-hidden mt-1">
+              <section className="rounded-xl border border-emerald-400/25 bg-emerald-950/10 p-3 text-xs text-emerald-50">
+                <h4 className="font-semibold text-emerald-200">สรุปการอ่าน Timeline</h4>
+                <p className="mt-1 text-[11px] leading-relaxed text-slate-200">
+                  ระบบเรียงเหตุการณ์จากข้อมูลวันเวลาเมื่อมี และเสนอให้ตรวจข้อความแชทกับสลิปจากฐานสัญญาณ OCR เท่านั้น
+                  คำหรือเวลาที่ใกล้กันเป็นเหตุผลให้ตรวจ ไม่ยืนยันว่าเป็นการโอน รายการเดียวกัน หรือมีเจตนาตามข้อความนั้น
+                </p>
+              </section>
+
+              <section className="space-y-4" aria-label="Timeline หลักฐานแชทและสลิป">
                 {buildProcessingWarningEntries(stagedQueue).length > 0 && (
-                  <div className="border-b border-amber-400/30 bg-amber-950/30 p-3 text-xs text-amber-200 space-y-1">
+                  <div className="rounded-xl border border-amber-400/30 bg-amber-950/30 p-3 text-xs text-amber-200 space-y-1">
                     {buildProcessingWarningEntries(stagedQueue).map(({ id, warning }) => (
                       <p key={id}>{warning}</p>
                     ))}
                   </div>
                 )}
-                <table className="w-full text-xs border-collapse text-left">
-                  <thead>
-                    <tr className="bg-slate-900/80 text-emerald-300 font-bold border-b border-white/10 font-mono text-[11px]">
-                      <th className="p-2.5 text-center w-12">คู่ที่</th>
-                      <th className="p-2.5">หน้าแชท / OCR group</th>
-                      <th className="p-2.5">ข้อมูลผู้รับจากรายการ</th>
-                      <th className="p-2.5">ลำดับของสลิปใน PDF</th>
-                      <th className="p-2.5 text-right">ยอดเงินตรวจคู่ (บาท)</th>
-                      <th className="p-2.5 text-center">ฐานสัญญาณ</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/5 text-[11px]">
-                    {chatSlipCorroborationCandidates.length === 0 ? (
-                      <tr>
-                        <td colSpan={6} className="p-8 text-center text-slate-400">
-                          ยังไม่พบ OCR ในหน้าแชทที่ตรงกับเลขอ้างอิง หรือยอดเงินพร้อมคำบ่งชี้การโอน
-                        </td>
-                      </tr>
-                    ) : (
-                      chatSlipCorroborationCandidates.map((candidate, idx) => {
-                          const record = ledgerRecords.find((item) => item.id === candidate.slipId);
-                          if (!record) return null;
-                          const slipPageRef = record.dossierPage ?? "ยังไม่มีหน้าในแฟ้ม PDF";
-                          const amt = record.data.transaction.amount || 0;
-                          const chatSource = candidate.chatSourceItemId
-                            ? stagedQueue.find((item) => item.id === candidate.chatSourceItemId)
-                            : undefined;
-                          const chatSliceIndex = chatSource && typeof candidate.chatPageNumber === "number"
-                            ? chatSource.chatStreamPageNumbers?.indexOf(candidate.chatPageNumber) ?? -1
-                            : -1;
-                          const chatImage = chatSliceIndex >= 0 ? chatSource?.chatSlices?.[chatSliceIndex] : undefined;
-                          return (
-                            <React.Fragment key={`${record.id}-${candidate.chatSourceItemId || "unknown"}-${candidate.chatPageNumber}-${candidate.groupId}-${idx}`}>
-                            <tr className="hover:bg-white/5 transition-colors text-slate-200">
-                              <td className="p-2.5 text-center font-mono font-bold text-sky-400">
-                                #{idx + 1}
-                              </td>
-                              <td className="p-2.5 font-mono">
-                                <span className="bg-sky-500/20 text-sky-300 px-2 py-0.5 rounded border border-sky-500/30">
-                                  หน้า {candidate.chatPageNumber} · {candidate.groupId}
-                                </span>
-                              </td>
-                              <td className="p-2.5 max-w-[220px] truncate text-slate-300">
-                                หลักฐานรายการของ {record.data.receiver.name || "ไม่ระบุผู้รับ"}
-                              </td>
-                              <td className="p-2.5 font-mono">
-                                <span className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded border border-emerald-500/30">
-                                  หน้าแฟ้ม PDF {slipPageRef}
-                                </span>
-                              </td>
-                              <td className="p-2.5 text-right font-mono font-bold text-emerald-400">
-                                ฿ {amt.toLocaleString("th-TH", { minimumFractionDigits: 2 })}
-                              </td>
-                              <td className="p-2.5 text-center">
-                                <span className="px-2 py-0.5 rounded font-mono text-[9.5px] font-bold bg-amber-500/20 text-amber-200 border border-amber-400/40">
-                                  รอตรวจ · {getCorroborationBasisLabel(candidate)}
-                                </span>
-                              </td>
-                            </tr>
-                            <tr className="bg-slate-950/40">
-                              <td colSpan={6} className="p-3">
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                  <figure className="min-w-0 border border-sky-400/20 rounded-md p-2">
-                                    <figcaption className="mb-2 text-[10px] text-sky-200">ภาพแชท · หน้า {candidate.chatPageNumber}{chatSource ? ` · ${chatSource.file.name}` : ""}</figcaption>
-                                    {chatImage ? (
-                                      <img src={chatImage} alt={`หลักฐานแชท หน้า ${candidate.chatPageNumber}`} className="w-full h-64 object-contain bg-black/40 rounded" />
-                                    ) : (
-                                      <div className="h-64 grid place-items-center text-[10px] text-slate-400">ไม่พบภาพหน้าแชทต้นทางสำหรับ candidate นี้</div>
-                                    )}
-                                  </figure>
-                                  <figure className="min-w-0 border border-emerald-400/20 rounded-md p-2">
-                                    <figcaption className="mb-2 text-[10px] text-emerald-200">สลิปต้นฉบับ · หน้าแฟ้ม PDF {slipPageRef} · {record.source}</figcaption>
-                                    <img src={record.crop} alt={`สลิปหลักฐาน ${record.source}`} className="w-full h-64 object-contain bg-black/40 rounded" />
-                                  </figure>
-                                </div>
-                                <p className="mt-2 text-[9px] text-amber-200">ภาพคู่สำหรับตรวจทานเท่านั้น · candidate นี้ยังไม่ใช่การยืนยันความสัมพันธ์</p>
-                              </td>
-                            </tr>
-                            </React.Fragment>
-                          );
-                        })
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                {timelineCandidateEntries.length === 0 ? (
+                  <div className="rounded-xl border border-white/10 bg-black/20 p-8 text-center text-xs text-slate-400">
+                    ยังไม่พบข้อความแชทที่ตรงกับเลขอ้างอิง หรือยอดเงินพร้อมฐานสัญญาณที่ใช้เสนอให้ตรวจ
+                  </div>
+                ) : timelineCandidateEntries.map((entry, idx) => {
+                  const { candidate, record, chatSource, chatImage, chatTimestampLabel, chatText, slipDate, slipTime } = entry;
+                  const slipPageRef = record.dossierPage ?? "ยังไม่มีหน้าในแฟ้ม PDF";
+                  const amount = record.data.transaction.amount;
+                  const hasSlipTime = Boolean(slipDate || slipTime);
+                  return (
+                    <article key={`${record.id}-${candidate.chatSourceItemId || "unknown"}-${candidate.chatPageNumber}-${candidate.groupId}-${idx}`} className="relative rounded-xl border border-white/10 bg-slate-950/35 p-3 pl-8">
+                      <span className="absolute left-3 top-4 h-3 w-3 rounded-full border-2 border-emerald-300 bg-emerald-900 shadow-[0_0_12px_rgba(52,211,153,0.65)]" aria-hidden="true" />
+                      {idx < timelineCandidateEntries.length - 1 && <span className="absolute left-[18px] top-7 bottom-[-18px] w-px bg-emerald-400/30" aria-hidden="true" />}
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <p className="text-[10px] font-mono text-emerald-300">เหตุการณ์ที่ {idx + 1} · {Number.isFinite(entry.orderTimestamp) ? "เรียงตามเวลาหลักฐาน" : "เวลาไม่ระบุ"}</p>
+                          <h4 className="mt-0.5 text-sm font-semibold text-slate-100">แชทและสลิปที่ระบบเสนอให้ตรวจร่วมกัน</h4>
+                        </div>
+                        <span className="rounded border border-amber-400/40 bg-amber-500/15 px-2 py-1 text-[10px] font-semibold text-amber-100">candidate · review_required</span>
+                      </div>
+
+                      <div className="mt-3 rounded-lg border border-amber-400/25 bg-amber-950/20 p-2.5 text-[11px] leading-relaxed text-amber-50">
+                        <span className="font-semibold">สรุป:</span>{" "}
+                        {chatText
+                          ? `ข้อความแชท${chatTimestampLabel ? `เวลา ${chatTimestampLabel}` : "ที่เวลาไม่ระบุ"} อาจเกี่ยวข้องกับสลิป${hasSlipTime ? `วันที่ ${slipDate || "ไม่ระบุ"}${slipTime ? ` เวลา ${slipTime}` : ""}` : "ที่เวลาไม่ระบุ"} เพราะระบบพบ ${getCorroborationBasisLabel(candidate)}.`
+                          : `ระบบเสนอให้ตรวจสลิป${hasSlipTime ? `วันที่ ${slipDate || "ไม่ระบุ"}${slipTime ? ` เวลา ${slipTime}` : ""}` : "ที่เวลาไม่ระบุ"} เพราะพบ ${getCorroborationBasisLabel(candidate)} แต่ไม่มีข้อความ OCR ของกลุ่มนี้ให้แสดง.`}
+                        <span className="block mt-1 text-[10px] text-amber-200">ข้อมูลนี้เป็นข้อเสนอให้ตรวจ ไม่ยืนยันว่าเป็นธุรกรรมเดียวกันหรือยืนยันเจตนาของข้อความ</span>
+                      </div>
+
+                      <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-[1fr_auto_1fr] lg:items-stretch">
+                        <section className="rounded-lg border border-sky-400/25 bg-sky-950/15 p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <h5 className="text-xs font-semibold text-sky-200">ข้อความแชท</h5>
+                            <span className="text-[10px] font-mono text-sky-300">{chatTimestampLabel || "เวลาไม่ระบุ"}</span>
+                          </div>
+                          <p className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-slate-200">{chatText || "ไม่พบข้อความ OCR ต้นทางสำหรับ candidate นี้"}</p>
+                          <p className="mt-2 text-[10px] text-slate-400">หน้าแชท {candidate.chatPageNumber ?? "ไม่ระบุ"}{chatSource ? ` · ${chatSource.file.name}` : " · ไม่พบไฟล์แชทต้นทาง"}</p>
+                          {chatImage ? (
+                            <img src={chatImage} alt={`หลักฐานแชท หน้า ${candidate.chatPageNumber ?? "ไม่ระบุ"}`} className="mt-2 h-52 w-full rounded object-contain bg-black/40" />
+                          ) : (
+                            <div className="mt-2 grid h-52 place-items-center rounded bg-black/30 p-3 text-center text-[10px] text-slate-400">ไม่พบภาพหน้าแชทต้นทางสำหรับ candidate นี้</div>
+                          )}
+                        </section>
+
+                        <div className="hidden lg:grid place-items-center text-emerald-300" aria-hidden="true">↔</div>
+
+                        <section className="rounded-lg border border-emerald-400/25 bg-emerald-950/15 p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <h5 className="text-xs font-semibold text-emerald-200">รายการสลิป</h5>
+                            <span className="text-[10px] font-mono text-emerald-300">{hasSlipTime ? `${slipDate || "ไม่ระบุวันที่"} ${slipTime}` : "เวลาไม่ระบุ"}</span>
+                          </div>
+                          <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-[11px]">
+                            <dt className="text-slate-400">ผู้รับ</dt><dd className="text-slate-100">{record.data.receiver.name || "ไม่ระบุ"}</dd>
+                            <dt className="text-slate-400">ยอดเงิน</dt><dd className="font-mono text-emerald-200">{typeof amount === "number" && amount > 0 ? `฿ ${amount.toLocaleString("th-TH", { minimumFractionDigits: 2 })}` : "ไม่ระบุ"}</dd>
+                            <dt className="text-slate-400">Ref ID</dt><dd className="break-all font-mono text-slate-200">{record.data.transaction.reference_no || "ไม่ระบุ"}</dd>
+                            <dt className="text-slate-400">แหล่งอ้างอิง</dt><dd className="text-slate-200">หน้าแฟ้ม PDF {slipPageRef} · {record.source}</dd>
+                          </dl>
+                          {record.crop ? (
+                            <img src={record.crop} alt={`สลิปหลักฐาน ${record.source}`} className="mt-2 h-52 w-full rounded object-contain bg-black/40" />
+                          ) : (
+                            <div className="mt-2 grid h-52 place-items-center rounded bg-black/30 p-3 text-center text-[10px] text-slate-400">ไม่พบภาพ crop ของสลิปสำหรับรายการนี้</div>
+                          )}
+                        </section>
+                      </div>
+                    </article>
+                  );
+                })}
+              </section>
             </div>
 
             {/* Footer */}
